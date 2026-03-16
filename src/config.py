@@ -1,0 +1,13 @@
+DAYS_WINDOW = 5
+CASH = 10000
+VOLUME = 0
+PRICE = None
+TIME = None
+HISTORY = None
+ACTIONS = [0,1,2] # 0: hold, 1: buy, 2: sell
+ACTIONS1 = [1,2,3,4,5,6,7,8,9] # buy/sell 1, 2, ..., 9 shares 
+NUM_EPISODES = 1000
+GAMMA = 0.9
+EPSILON = 1.0
+DECAY_RATE = 0.999
+TRAIN_SIZE = 0.8
