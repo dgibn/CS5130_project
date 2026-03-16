@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-def preprocess_for_qlearning(history, 
+def preprocess_for_qlearning(history, scaler=None,
                              return_bins=10, 
                              vol_bins=10, 
                              ma_bins=10,
@@ -30,7 +30,8 @@ def preprocess_for_qlearning(history,
     
 
     features = ['log_return', 'ma_ratio', 'volatility']
-    scaler = StandardScaler()
+    if scaler is None:
+        scaler = StandardScaler()
     history[features] = scaler.fit_transform(history[features])
     
 
@@ -59,8 +60,10 @@ def train_test_split(df, train_size):
 def load_data(ticker, train_size, period="1y"):
     ticker = yf.Ticker(ticker)
     history = ticker.history(period=period)
-    history, n_states, scaler = preprocess_for_qlearning(history)
     train_df, test_df = train_test_split(history, train_size)
+    train_df, n_states, scaler = preprocess_for_qlearning(train_df, scaler=None)
+    test_df, _, _ = preprocess_for_qlearning(test_df, scaler=scaler)
+    
     return train_df, test_df, n_states, scaler
 
 
