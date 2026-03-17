@@ -1,15 +1,22 @@
 import random
 from tqdm import tqdm
 import numpy as np
+from config import *
 
 def reward(prev_state, next_state, action):
     if prev_state["volume"] == 0 and action == 2:
-        return -10  # Penalty for selling without position
+        return -10
     if prev_state["cash"] < prev_state["price"] and action == 1:
-        return -10  # Penalty for buying without cash
-    prev_value = prev_state["cash"] + prev_state["volume"] * prev_state["price"]
-    next_value = next_state["cash"] + next_state["volume"] * next_state["price"]
-    return next_value - prev_value
+        return -10
+
+    r = 0.0
+    if prev_state["volume"] > 0 and prev_state["price"] > 0:
+        r = np.log(next_state["price"] / prev_state["price"]) * prev_state["volume"]
+
+    if action in (1, 2):
+        r -= TRANSACTION_COST
+
+    return r
 
 
 def step(df, state, action, index, days_window):
@@ -18,13 +25,13 @@ def step(df, state, action, index, days_window):
     if action == 0: # hold
         revenue = 0
     elif action == 1: # buy
-        shares_to_buy = min(state["cash"] // price, 20) # can only buy up to 20 shares
+        shares_to_buy = min(state["cash"] // price, 10) # can only buy up to 20 shares
         cost = shares_to_buy * price
         state["cash"] -= cost
         state["volume"] += shares_to_buy
         revenue = -cost
     elif action == 2: # sell
-        shares_to_sell = min(state["volume"], 20) # can only sell up to 20 shares
+        shares_to_sell = min(state["volume"], 10) # can only sell up to 20 shares
         revenue = shares_to_sell * price
         state["cash"] += revenue
         state["volume"] -= shares_to_sell
@@ -50,7 +57,7 @@ def Q_learning(train_df, days_window, actions, actions1, num_episodes, gamma, ep
         initial_index = random.randint(days_window, len(train_df)-1)
 
         state = {
-            "cash": 10000,
+            "cash": CASH,
             "volume": 0,
             "price": train_df["Close"].iloc[initial_index],
             "time": train_df.index[initial_index]
@@ -96,7 +103,7 @@ def Q_learning(train_df, days_window, actions, actions1, num_episodes, gamma, ep
 
 
             update_counts[state_key][action] += 1
-            eta = 1.0 / update_counts[state_key][action]
+            eta = max(ALPHA_MIN, ALPHA_MAX / update_counts[state_key][action] ** 0.6)
 
 
             Q_table[state_key][action] += eta * (
@@ -107,7 +114,7 @@ def Q_learning(train_df, days_window, actions, actions1, num_episodes, gamma, ep
 
             state = next_state
 
-        epsilon *= decay_rate
+        epsilon = max(EPSILON_MIN, 1.0 - episode / (0.7 * num_episodes))
 
     return Q_table
 

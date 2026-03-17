@@ -4,7 +4,7 @@ from config import *
 import pickle
 
 def train():
-    ticker = "AAPL"
+    ticker = "GOOG"
     period = "10y"
     train_df, test_df, n_states, scaler = load_data(ticker, TRAIN_SIZE, period)
     Q_table = Q_learning(train_df, DAYS_WINDOW, ACTIONS, ACTIONS1, NUM_EPISODES, GAMMA, EPSILON, DECAY_RATE)
