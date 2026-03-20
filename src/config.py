@@ -36,3 +36,5 @@ LEARNING_RATE = 5e-4
 NUM_EPISODES = 3000
 TARGET_UPDATE_FREQ = 20       # sync target network every N episodes
 REPLAY_BUFFER_SIZE = 50000
+TRAIN_EVERY = 4               # gradient update every N env steps
+MAX_STEPS_PER_EPISODE = 200   # cap episode length

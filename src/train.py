@@ -80,8 +80,9 @@ def train_rnn():
 
         idx = random.randint(SEQ_LEN, n_data - 2)
         cash, volume = float(CASH), 0
+        steps = 0
 
-        while idx < n_data - 1:
+        while idx < n_data - 1 and steps < MAX_STEPS_PER_EPISODE:
             state_seq = features[idx - SEQ_LEN + 1 : idx + 1]   # (L, C)
             price_now = prices[idx]
             price_next = prices[idx + 1]
@@ -125,9 +126,10 @@ def train_rnn():
                 else state_seq
             )
             buffer.append((state_seq, action, r, next_seq, float(done)))
+            steps += 1
 
-            # train on a mini-batch
-            if len(buffer) >= BATCH_SIZE:
+            # train on a mini-batch every N steps
+            if len(buffer) >= BATCH_SIZE and steps % TRAIN_EVERY == 0:
                 s, a, rew, s2, d = sample_buffer(BATCH_SIZE)
                 q_vals = online_net(s)[:, -1, :]                 # (B, A)
                 with torch.no_grad():
