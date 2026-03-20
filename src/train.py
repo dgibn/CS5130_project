@@ -19,10 +19,11 @@ def train_qlearning():
     from dataloader import load_data
     from Q_learning import Q_learning
 
-    train_df, test_df, n_states, scaler = load_data(TICKER, TRAIN_SIZE, PERIOD)
+    ticker = TICKERS[0]
+    train_df, test_df, n_states, scaler = load_data(ticker, TRAIN_SIZE, PERIOD)
     Q_table = Q_learning(
         train_df, DAYS_WINDOW, ACTIONS, ACTIONS1,
-        NUM_EPISODES, GAMMA, EPSILON, DECAY_RATE,
+        NUM_EPISODES_QL, GAMMA, EPSILON, DECAY_RATE,
     )
 
     with open("Q_table.pickle", "wb") as f:
@@ -33,19 +34,23 @@ def train_qlearning():
 def train_rnn():
     print(f"Using device: {device}")
 
-    # --- data --------------------------------------------------------------
-    hist = yf.Ticker(TICKER).history(period=PERIOD)
-    train_raw, _ = train_test_split(hist, TRAIN_SIZE)
-    train_df, scaler = preprocess_for_rnn(train_raw)
+    # --- load all tickers, fit one shared scaler ---------------------------
+    all_features = []
+    all_prices = []
+    scaler = None
 
-    features = torch.tensor(
-        train_df[FEATURE_COLS].values, dtype=torch.float32, device=device,
-    )
-    prices = train_df["Close"].values
-    n_data = len(train_df)
+    for ticker in TICKERS:
+        print(f"Loading {ticker}...")
+        hist = yf.Ticker(ticker).history(period=PERIOD)
+        train_raw, _ = train_test_split(hist, TRAIN_SIZE)
+        train_df, scaler = preprocess_for_rnn(train_raw, scaler=scaler)
+        all_features.append(
+            torch.tensor(train_df[FEATURE_COLS].values, dtype=torch.float32)
+        )
+        all_prices.append(train_df["Close"].values)
 
     # --- networks & optimizer ----------------------------------------------
-    online_net = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM).to(device)
+    online_net = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM, NUM_LAYERS).to(device)
     target_net = copy.deepcopy(online_net)
     target_net.eval()
     optimizer = torch.optim.Adam(online_net.parameters(), lr=LEARNING_RATE)
@@ -68,6 +73,11 @@ def train_rnn():
     epsilon = EPSILON
 
     for episode in tqdm(range(NUM_EPISODES), desc="RNN-DQN"):
+        ti = random.randint(0, len(TICKERS) - 1)
+        features = all_features[ti]
+        prices = all_prices[ti]
+        n_data = len(features)
+
         idx = random.randint(SEQ_LEN, n_data - 2)
         cash, volume = float(CASH), 0
 
@@ -81,7 +91,7 @@ def train_rnn():
                 action = random.choice(ACTIONS)
             else:
                 with torch.no_grad():
-                    q = online_net(state_seq.unsqueeze(0))       # (1, L, A)
+                    q = online_net(state_seq.unsqueeze(0).to(device))
                     action = q[0, -1, :].argmax().item()
 
             # reward (mirrors Q_learning.py)
@@ -114,7 +124,7 @@ def train_rnn():
                 if not done
                 else state_seq
             )
-            buffer.append((state_seq.cpu(), action, r, next_seq.cpu(), float(done)))
+            buffer.append((state_seq, action, r, next_seq, float(done)))
 
             # train on a mini-batch
             if len(buffer) >= BATCH_SIZE:

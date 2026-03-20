@@ -55,10 +55,9 @@ def test_qlearning(test_df, days_window):
     print(f"Profit over baseline:    {final_value - baseline_value:.2f}")
 
 
-def test_rnn(days_window):
-    print(f"Using device: {device}")
-
-    hist = yf.Ticker(TICKER).history(period=PERIOD)
+def test_rnn_single(ticker):
+    """Evaluate the trained RNN-DQN on one ticker's test set."""
+    hist = yf.Ticker(ticker).history(period=PERIOD)
     _, test_raw = train_test_split(hist, TRAIN_SIZE)
     test_df, _ = preprocess_for_rnn(test_raw)
 
@@ -67,10 +66,6 @@ def test_rnn(days_window):
     )
     prices = test_df["Close"].values
     n_data = len(test_df)
-
-    model = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM).to(device)
-    model.load_state_dict(torch.load("rnn_q_network.pt", map_location=device))
-    model.eval()
 
     days_to_simulate = min(240, n_data - SEQ_LEN - 1)
     cash, volume = float(CASH), 0
@@ -117,9 +112,19 @@ def test_rnn(days_window):
 
 if __name__ == "__main__":
     if MODE == "qlearning":
-        _, test_df, _, _ = load_data(TICKER, TRAIN_SIZE, PERIOD)
+        ticker = TICKERS[0]
+        _, test_df, _, _ = load_data(ticker, TRAIN_SIZE, PERIOD)
         test_qlearning(test_df, DAYS_WINDOW)
+
     elif MODE == "rnn":
-        test_rnn(DAYS_WINDOW)
+        print(f"Using device: {device}")
+        model = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM, NUM_LAYERS).to(device)
+        model.load_state_dict(torch.load("rnn_q_network.pt", map_location=device))
+        model.eval()
+
+        for ticker in TICKERS:
+            print(f"\n{'='*20} {ticker} {'='*20}")
+            test_rnn_single(ticker)
+
     else:
         raise ValueError(f"Unknown MODE: {MODE}")
