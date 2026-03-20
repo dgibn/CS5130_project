@@ -1,61 +1,125 @@
 import pickle
 import numpy as np
+import torch
 from Q_learning import step
 from config import *
-from dataloader import load_data
+from dataloader import load_data, train_test_split, FEATURE_COLS
+from dataloader_rnn import preprocess_for_rnn
+from RNN import RNNQNetwork
+import yfinance as yf
 
-def test(test_df, days_window):
-    with open('Q_table.pickle', 'rb') as f:
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def test_qlearning(test_df, days_window):
+    with open("Q_table.pickle", "rb") as f:
         Q_table = pickle.load(f)
+
     initial_cash = CASH
-    initial_index = 0
-    days_to_simulate = 240
+    days_to_simulate = min(240, len(test_df) - 1)
     state = {
         "cash": initial_cash,
         "volume": 0,
-        "price": test_df["Close"].iloc[initial_index],
-        "time": test_df.index[initial_index]
+        "price": test_df["Close"].iloc[0],
+        "time": test_df.index[0],
     }
-    reward_history = []
-    baseline_value = initial_cash // test_df["Close"].iloc[initial_index] * test_df["Close"].iloc[initial_index+days_to_simulate-1]
-    print(test_df.iloc[initial_index+days_to_simulate-1,:])
+    baseline_value = (
+        initial_cash // test_df["Close"].iloc[0]
+        * test_df["Close"].iloc[days_to_simulate - 1]
+    )
 
     for t in range(days_to_simulate):
-
         index = test_df.index.get_loc(state["time"])
-
         if index >= len(test_df) - 1:
             break
-        
-        market_state = test_df['state'].iloc[index]
+
+        market_state = test_df["state"].iloc[index]
         position = int(np.sign(state["volume"]))
         state_key = (market_state, position)
 
-        if state_key in Q_table:
-            action = np.argmax(Q_table[state_key])
-        else:
-            action = 0  # hold if unseen
+        action = np.argmax(Q_table[state_key]) if state_key in Q_table else 0
 
-        print(f"Day {t+1}: Action: {action}, "
+        print(
+            f"Day {t+1}: Action: {action}, "
             f"Cash: {state['cash']:.2f}, "
             f"Volume: {state['volume']}, "
-            f"Price: {state['price']:.2f}")
+            f"Price: {state['price']:.2f}"
+        )
 
         next_state, _ = step(test_df, state.copy(), action, index, days_window)
-        reward_history.append(next_state["cash"] + next_state["volume"] * next_state["price"])
-
         state = next_state
 
-    # Final portfolio value
     final_value = state["cash"] + state["volume"] * state["price"]
-    print("Final portfolio value:", final_value)
-    print("Baseline portfolio value:", baseline_value)
-    print("Profit:", final_value - baseline_value)
-    print("Profit percentage:", (final_value - baseline_value) / baseline_value * 100)
+    print(f"\nFinal portfolio value:    {final_value:.2f}")
+    print(f"Baseline (buy & hold):   {baseline_value:.2f}")
+    print(f"Profit over baseline:    {final_value - baseline_value:.2f}")
+
+
+def test_rnn(days_window):
+    print(f"Using device: {device}")
+
+    hist = yf.Ticker(TICKER).history(period=PERIOD)
+    _, test_raw = train_test_split(hist, TRAIN_SIZE)
+    test_df, _ = preprocess_for_rnn(test_raw)
+
+    features = torch.tensor(
+        test_df[FEATURE_COLS].values, dtype=torch.float32, device=device,
+    )
+    prices = test_df["Close"].values
+    n_data = len(test_df)
+
+    model = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM).to(device)
+    model.load_state_dict(torch.load("rnn_q_network.pt", map_location=device))
+    model.eval()
+
+    days_to_simulate = min(240, n_data - SEQ_LEN - 1)
+    cash, volume = float(CASH), 0
+    start_idx = SEQ_LEN
+    baseline_value = (
+        cash // prices[start_idx]
+        * prices[start_idx + days_to_simulate - 1]
+    )
+
+    for t in range(days_to_simulate):
+        idx = start_idx + t
+        if idx >= n_data - 1:
+            break
+
+        state_seq = features[idx - SEQ_LEN + 1 : idx + 1]
+        with torch.no_grad():
+            q = model(state_seq.unsqueeze(0))
+            action = q[0, -1, :].argmax().item()
+
+        price_now = prices[idx]
+
+        print(
+            f"Day {t+1}: Action: {action}, "
+            f"Cash: {cash:.2f}, "
+            f"Volume: {volume}, "
+            f"Price: {price_now:.2f}"
+        )
+
+        if action == 1:
+            shares = min(int(cash // price_now), 10)
+            cash -= shares * price_now
+            volume += shares
+        elif action == 2:
+            shares = min(volume, 10)
+            cash += shares * price_now
+            volume -= shares
+
+    final_price = prices[min(start_idx + days_to_simulate - 1, n_data - 1)]
+    final_value = cash + volume * final_price
+    print(f"\nFinal portfolio value:    {final_value:.2f}")
+    print(f"Baseline (buy & hold):   {baseline_value:.2f}")
+    print(f"Profit over baseline:    {final_value - baseline_value:.2f}")
+
 
 if __name__ == "__main__":
-    ticker = "GOOG"
-    period = "10y"
-
-    _, test_df, _, _ = load_data(ticker, TRAIN_SIZE, period)
-    test(test_df, DAYS_WINDOW)
+    if MODE == "qlearning":
+        _, test_df, _, _ = load_data(TICKER, TRAIN_SIZE, PERIOD)
+        test_qlearning(test_df, DAYS_WINDOW)
+    elif MODE == "rnn":
+        test_rnn(DAYS_WINDOW)
+    else:
+        raise ValueError(f"Unknown MODE: {MODE}")
