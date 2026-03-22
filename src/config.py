@@ -2,7 +2,7 @@
 MODE = "rnn"                  # "qlearning" or "rnn"
 
 # ── shared ────────────────────────────────────────────────────────────
-TICKERS = ["GOOG", "AAPL", "MSFT", "AMZN", "META"]
+TICKERS = ["AAPL", "MSFT", "AMZN", "META"]
 PERIOD = "10y"
 DAYS_WINDOW = 5
 CASH = 10000

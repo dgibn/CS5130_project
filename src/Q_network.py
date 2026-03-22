@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class QNetwork2(nn.Module):
+class DuelingDQN(nn.Module):
     """
     Dueling Q-Network with noisy layers, layer normalization, and orthogonal init.
 
@@ -65,6 +65,7 @@ class QNetwork2(nn.Module):
         torch.Tensor  shape (..., action_size)
             Q-values for each action.
         """
+
         features = self.trunk(state)
 
         value = self.value_stream(features)                        # (..., 1)
@@ -79,11 +80,6 @@ class QNetwork2(nn.Module):
         for m in self.modules():
             if isinstance(m, NoisyLinear):
                 m.reset_noise()
-
-
-# ---------------------------------------------------------------------------
-# NoisyLinear — Fortunato et al., 2017 (factorised version)
-# ---------------------------------------------------------------------------
 
 class NoisyLinear(nn.Module):
     """

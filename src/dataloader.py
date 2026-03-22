@@ -129,8 +129,8 @@ def _apply_bins(df: pd.DataFrame, bin_edges: dict[str, np.ndarray]) -> pd.DataFr
 
 def preprocess_for_qlearning(
     df: pd.DataFrame,
-    scaler: StandardScaler | None = None,
-    bin_edges: dict | None = None,
+    scaler: StandardScaler = None,
+    bin_edges: dict = None,
     n_bins: int = BINS,
     **feature_kwargs,
 ) -> tuple[pd.DataFrame, int, StandardScaler, dict]:
