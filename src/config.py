@@ -2,7 +2,7 @@
 MODE = "rnn"                  # "qlearning" or "rnn"
 
 # ── shared ────────────────────────────────────────────────────────────
-TICKERS = ["AAPL", "MSFT", "AMZN", "META"]
+TICKERS = ["GOOG","AAPL","MSFT", "AMZN", "META"]
 PERIOD = "10y"
 DAYS_WINDOW = 5
 CASH = 10000
@@ -19,7 +19,7 @@ TRANSACTION_COST = 0.001
 TRAIN_SIZE = 0.8
 
 # ── Q-learning specific ──────────────────────────────────────────────
-NUM_EPISODES_QL = 1000
+NUM_EPISODES_QL = 5000
 BINS = 4
 ALPHA_MAX = 0.1
 ALPHA_MIN = 0.01

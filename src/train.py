@@ -4,6 +4,8 @@ import copy
 import random
 import numpy as np
 import torch
+import tempfile
+import os
 from collections import deque
 from tqdm import tqdm
 from dataloader import train_test_split, FEATURE_COLS
@@ -12,8 +14,11 @@ from RNN import RNNQNetwork
 from Q_network import DuelingDQN
 from loss import double_dqn_loss , dqn_loss
 import yfinance as yf
+import yfinance.cache as yfc
 from dataloader import load_data
 from Q_learning import Q_learning
+
+yf.set_tz_cache_location("/tmp")  # use local disk instead of NFS 
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -22,6 +27,16 @@ device = torch.device(
 )
 
 
+PERIOD  = "5y"    # your period
+
+# os.makedirs("./data_cache", exist_ok=True)
+# for ticker in TICKERS:
+#     print(f"Downloading {ticker}...")
+#     df = yf.Ticker(ticker).history(period=PERIOD)
+#     df.to_parquet(f"./data_cache/{ticker}.parquet")
+#     print(f"  Saved {len(df)} rows")
+
+# exit()
 def train_qlearning():
     
     
@@ -120,7 +135,7 @@ def train_rnn():
     epsilon = EPSILON
     best_test_raw_return = float("-inf")
 
-    for episode in tqdm(range(NUM_EPISODES), desc="RNN-DQN"):
+    for episode in tqdm(range(NUM_EPISODES_QL), desc="RNN-DQN"):
         ti = random.randint(0, len(TICKERS) - 1)
         features = all_features[ti]
         prices = all_prices[ti]
@@ -191,7 +206,7 @@ def train_rnn():
                 torch.nn.utils.clip_grad_norm_(online_net.parameters(), 1.0)
                 optimizer.step()
 
-        epsilon = max(EPSILON_MIN, 1.0 - episode / (0.7 * NUM_EPISODES))
+        epsilon = max(EPSILON_MIN, 1.0 - episode / (0.7 * NUM_EPISODES_QL))
 
         if (episode + 1) % TARGET_UPDATE_FREQ == 0:
             target_net.load_state_dict(online_net.state_dict())
@@ -216,7 +231,7 @@ def train_qNET():
         train_df, scaler = preprocess_for_rnn(train_raw, scaler=scaler)
         all_train_dfs[ticker] = train_df
 
-    q_net      = DuelingDQN(15, len(ACTIONS)).to(device)
+    q_net      = DuelingDQN(162, len(ACTIONS)).to(device)
     target_net = copy.deepcopy(q_net)
     target_net.eval()
 
@@ -230,20 +245,53 @@ def train_qNET():
     def epsilon_schedule(episode, eps_start=1.0, eps_end=0.01, decay=0.995):
         return max(eps_end, eps_start * (decay ** episode))
 
-    def compute_reward(df, idx, action, position):
+   
+
+    REWARD_SCALE     = 300.0   # brings log returns into -1..+1 range
+
+    def compute_reward(df, idx, action, cash, volume):
         price_now  = df["Close"].iloc[idx]
         price_next = df["Close"].iloc[min(idx + 1, len(df) - 1)]
-        ret        = (price_next - price_now) / price_now
-        if action == 1:
-            position = 1
-        elif action == 2:
-            position = 0
-        return float(position * ret), position
+        log_ret    = float(np.log(price_next / price_now))  # ~-0.03 to +0.03
 
-    def get_state(df, idx):
-        return torch.tensor(
-            df.iloc[idx].values.flatten().astype(np.float32), dtype=torch.float32
-        )
+        # ── Tier 1: Hard penalties for impossible actions ─────────────────────
+        if action == 2 and volume == 0:   # sell with nothing held
+            return -20.0
+        if action == 1 and cash < price_now:  # buy with no money
+            return -40.0
+
+        # ── Tier 2: Action-shaped rewards ────────────────────────────────────
+        if action == 1:  # BUY
+            # Reward buying before an up-move, penalise buying before a drop
+            reward = log_ret * REWARD_SCALE
+            reward -= TRANSACTION_COST
+            return float(reward)
+
+        if action == 2:  # SELL
+            # Reward selling before a drop (escaped loss), penalise selling before rise
+            reward = -log_ret * REWARD_SCALE   # good exit if ret < 0
+            reward -= TRANSACTION_COST
+            return float(reward)
+
+        # ── Tier 3: HOLD ──────────────────────────────────────────────────────
+        if action == 0:
+            if volume > 0:
+                # Holding a position: reward/punish proportional to price move
+                return float(log_ret * volume * REWARD_SCALE)
+            else:
+                # Holding flat: small time penalty to discourage infinite waiting
+                # -0.1 is mild — clearly distinct from the -10 illegal penalty
+                return -5.0
+
+    def get_state(df, idx: int, cash: float, volume: int) -> torch.Tensor:
+        row = df.iloc[idx - SEQ_LEN + 1 : idx + 1].values.flatten().astype(np.float32)
+        # Append portfolio state so agent can learn legal action boundaries
+        portfolio = np.array([
+            cash / CASH,          # normalised cash (0–1 range)
+            float(volume) / 10.0, # normalised volume (assuming max 10 shares)
+        ], dtype=np.float32)
+
+        return torch.tensor(np.concatenate([row, portfolio]), dtype=torch.float32)
 
     def sample_buffer(batch_size):
         batch = random.sample(buffer, batch_size)
@@ -256,33 +304,52 @@ def train_qNET():
             torch.tensor(d, dtype=torch.float32, device=device),
         )
 
-    for episode in tqdm(range(NUM_EPISODES), desc="Dueling DQN"):
+    for episode in tqdm(range(NUM_EPISODES_QL), desc="Dueling DQN"):
 
         epsilon = epsilon_schedule(episode)
 
-        # ── BUG 3 FIX: loop over ALL tickers each episode ────────────────
-        for ticker, train_df in all_train_dfs.items():
-            position = 0
-            T        = len(train_df) - 1
+        ti = random.randint(0, len(TICKERS) - 1)
 
-            for t in range(T):
-                state = get_state(train_df, t)
+        train_df = all_train_dfs[TICKERS[ti]]
+        # for ticker, train_df in all_train_dfs.items():
+        position = 0
+        cash     = float(CASH)
+        volume   = 0
+        T        = len(train_df) - 1
+        idx = random.randint(SEQ_LEN, T - 1)
 
-                if random.random() < epsilon:
-                    action = random.randrange(len(ACTIONS))
-                else:
-                    q_net.eval()
-                    with torch.no_grad():
-                        # ── BUG 4 FIX: reset noise before every forward pass
-                        q_net.reset_noise()
-                        s_t    = state.unsqueeze(0).to(device)
-                        action = q_net(s_t).argmax(dim=1).item()
-                    q_net.train()
+        for t in range(idx,T):
+            state = get_state(train_df[FEATURE_COLS], t,cash, volume)
 
-                reward, position = compute_reward(train_df, t, action, position)
-                next_state       = get_state(train_df, t + 1)
-                done             = (t == T - 1)
-                buffer.append([state, action, reward, next_state, done])
+            if random.random() < epsilon:
+                action = random.randrange(len(ACTIONS))
+            else:
+                q_net.eval()
+                with torch.no_grad():
+                   
+                    q_net.reset_noise()
+                    s_t    = state.unsqueeze(0).to(device)
+                    action = q_net(s_t).argmax(dim=1).item()
+                q_net.train()
+
+            price_now = train_df["Close"].iloc[t]
+
+            # Execute action to update cash/volume BEFORE computing next state
+            if action == 1 and cash >= price_now:
+                shares  = min(int(cash // price_now), 10)
+                cash   -= shares * price_now
+                volume += shares
+            elif action == 2 and volume > 0:
+                shares  = min(volume, 10)
+                cash   += shares * price_now
+                volume -= shares
+            
+
+            reward = compute_reward(train_df, t, action, cash, volume)
+            next_state       = get_state(train_df[FEATURE_COLS], t + 1, cash, volume)
+            done             = (t == T - 1)
+
+            buffer.append([state, action, reward, next_state, done])
 
         if len(buffer) < WARMUP_STEPS:
             continue
@@ -315,8 +382,8 @@ def train_qNET():
             print(f"Episode {episode+1}, Avg Loss: {total_loss/steps:.4f}")
             total_loss, steps = 0.0, 0
 
-    torch.save(q_net.state_dict(), "q_net.pt")
-    print("Saved q_net.pt")
+    torch.save(q_net.state_dict(), "/projects/vig/divs/CS5130_project/Q_net4.pt")
+    print("Saved q_net")
 
 
 if __name__ == "__main__":

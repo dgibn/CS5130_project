@@ -1,6 +1,7 @@
 import pickle
 import numpy as np
 import torch
+import os
 from Q_learning import step
 from config import *
 from dataloader import load_data, train_test_split, FEATURE_COLS
@@ -8,6 +9,8 @@ from dataloader_rnn import preprocess_for_rnn
 from RNN import RNNQNetwork
 from Q_network import DuelingDQN
 import yfinance as yf
+
+yf.set_tz_cache_location("/tmp") 
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -114,7 +117,7 @@ def test_rnn_single(ticker):
     print(f"Baseline (buy & hold):   {baseline_value:.2f}")
     print(f"Profit over baseline:    {final_value - baseline_value:.2f}")
 
-def test_Qnet_single(ticker):
+def test_Qnet_single(q_net,ticker,cash,volume):
     """Evaluate the trained QNet on one ticker's test set."""
 
     # ── Load & preprocess ────────────────────────────────────────────────
@@ -125,29 +128,28 @@ def test_Qnet_single(ticker):
     prices = test_df["Close"].values
     n_data = len(test_df)
 
-    # ── Load trained model ───────────────────────────────────────────────
-    q_net = DuelingDQN(15, len(ACTIONS)).to(device)
-    q_net.load_state_dict(torch.load("q_net.pt", map_location=device))
-    q_net.eval()
-
     # ── Simulation setup ─────────────────────────────────────────────────
-    start_idx        = 0
-    days_to_simulate = min(240, n_data - 1)
-    cash, volume     = float(CASH), 0
+    start_idx        = SEQ_LEN
+    days_to_simulate = max(240, n_data - 1 - SEQ_LEN)
+
 
     # ── Baseline (buy & hold) ───────────────────────────────────────────
     entry_price    = prices[start_idx]
     shares_bh      = int(cash // entry_price)
     baseline_value = (
-        shares_bh * prices[start_idx + days_to_simulate - 1]
-        + (cash - shares_bh * entry_price)
+        cash // prices[start_idx]
+        * prices[start_idx + days_to_simulate - 1]
     )
 
-    def get_state(df, idx: int) -> torch.Tensor:
-        return torch.tensor(
-            df.iloc[idx].values.flatten().astype(np.float32),
-            dtype=torch.float32,
-        )
+    def get_state(df, idx: int, cash: float, volume: int) -> torch.Tensor:
+        row = df.iloc[idx - SEQ_LEN + 1 : idx + 1].values.flatten().astype(np.float32)
+        portfolio = np.array([
+            cash / CASH,           # normalised cash
+            float(volume) / 10.0,  # normalised volume
+        ], dtype=np.float32)
+        return torch.tensor(np.concatenate([row, portfolio]), dtype=torch.float32)
+
+    q_net.eval()
 
     # ── Simulation loop ───────────────────────────────────────────────────
     for t in range(days_to_simulate):
@@ -155,7 +157,7 @@ def test_Qnet_single(ticker):
         if idx >= n_data - 1:
             break
 
-        state = get_state(test_df, idx).to(device)
+        state = get_state(test_df[FEATURE_COLS], idx, cash, volume).to(device)
 
         with torch.no_grad():
             # BUG 3 FIX: reset noise before every inference forward pass
@@ -163,59 +165,75 @@ def test_Qnet_single(ticker):
             action = q_net(state.unsqueeze(0)).argmax(dim=1).item()
 
         price_now = prices[idx]
-        print(
-            f"Day {t+1:>3}: Action: {ACTIONS[action]:<4}  "
-            f"Cash: {cash:>10.2f}  "
-            f"Volume: {volume:>4}  "
-            f"Price: {price_now:>8.2f}"
-        )
+        # print(
+        #     f"Day {t+1:>3}: Action: {ACTIONS[action]:<4}  "
+        #     f"Cash: {cash:>10.2f}  "
+        #     f"Volume: {volume:>4}  "
+        #     f"Price: {price_now:>8.2f}"
+        # )
 
-        if action == 1:   # buy
-            shares  = min(int(cash // price_now), 10)
-            cash   -= shares * price_now
-            volume += shares
-        elif action == 2: # sell
-            shares  = min(volume, 10)
-            cash   += shares * price_now
-            volume -= shares
+        if action == 1 and cash >= price_now:    # buy
+            shares   = min(int(cash // price_now), 10)
+            cash    -= shares * price_now
+            volume  += shares
+            position = 1
+        elif action == 2 and volume > 0:         # sell
+            shares   = min(volume, 10)
+            cash    += shares * price_now
+            volume  -= shares
+            position = 0 if volume == 0 else position
 
     # ── Final report ──────────────────────────────────────────────────────
     final_price = prices[min(start_idx + days_to_simulate - 1, n_data - 1)]
     final_value = cash + volume * final_price
 
-    print(f"\n{'─'*40}")
-    print(f"Final portfolio value  : {final_value:>10.2f}")
-    print(f"Baseline (buy & hold)  : {baseline_value:>10.2f}")
-    print(f"Profit over baseline   : {final_value - baseline_value:>10.2f}")
+    # print(f"\n{'─'*40}")
+    # print(f"Final portfolio value  : {final_value:>10.2f}")
+    # print(f"Baseline (buy & hold)  : {baseline_value:>10.2f}")
+    # print(f"Profit over baseline   : {final_value - baseline_value:>10.2f}")
+
+    return final_value,baseline_value
 
 if __name__ == "__main__":
 
     print(f"Using device: {device}")
-    model = DuelingDQN(15, len(ACTIONS)).to(device)
-    model.load_state_dict(torch.load("q_net.pt", map_location=device))
+    model = DuelingDQN(162, len(ACTIONS)).to(device)
+    model.load_state_dict(torch.load("/projects/vig/divs/CS5130_project/Q_net4.pt", map_location=device))
     model.eval()
 
+    total_val = 0.0 
+    Baseline_val = 0.0 
     for ticker in TICKERS:
-        print(f"\n{'='*20} {ticker} {'='*20}")
-        test_Qnet_single(ticker)
+        val1,val2=test_Qnet_single(model,ticker,float(CASH),0)
+        print(val1,val2)
+        total_val+=val1
+        Baseline_val +=val2
+
+    
+
+    print(f"\n{'─'*40}")
+    print(f"Final portfolio value  : {total_val:>10.2f}")
+    print(f"Baseline (buy & hold)  : {Baseline_val:>10.2f}")
+    print(f"Profit over baseline   : {(total_val-Baseline_val):>10.2f}")
 
 
 
-    exit()
-    if MODE == "qlearning":
-        ticker = TICKERS[0]
-        _, test_df, _, _ = load_data(ticker, TRAIN_SIZE, PERIOD)
-        test_qlearning(test_df, DAYS_WINDOW)
 
-    elif MODE == "rnn":
-        print(f"Using device: {device}")
-        model = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM, NUM_LAYERS).to(device)
-        model.load_state_dict(torch.load("rnn_q_network.pt", map_location=device))
-        model.eval()
+    # exit()
+    # if MODE == "qlearning":
+    #     ticker = TICKERS[0]
+    #     _, test_df, _, _ = load_data(ticker, TRAIN_SIZE, PERIOD)
+    #     test_qlearning(test_df, DAYS_WINDOW)
 
-        for ticker in TICKERS:
-            print(f"\n{'='*20} {ticker} {'='*20}")
-            test_rnn_single(ticker)
+    # elif MODE == "rnn":
+    #     print(f"Using device: {device}")
+    #     model = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM, NUM_LAYERS).to(device)
+    #     model.load_state_dict(torch.load("rnn_q_network.pt", map_location=device))
+    #     model.eval()
 
-    else:
-        raise ValueError(f"Unknown MODE: {MODE}")
+    #     for ticker in TICKERS:
+    #         print(f"\n{'='*20} {ticker} {'='*20}")
+    #         test_rnn_single(ticker)
+
+    # else:
+    #     raise ValueError(f"Unknown MODE: {MODE}")
