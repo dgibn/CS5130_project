@@ -44,17 +44,24 @@ def train_rnn():
     # --- load all tickers, fit one shared scaler ---------------------------
     all_features = []
     all_prices = []
+    all_test_features = []
+    all_test_prices = []
     scaler = None
 
     for ticker in TICKERS:
         print(f"Loading {ticker}...")
         hist = yf.Ticker(ticker).history(period=PERIOD)
-        train_raw, _ = train_test_split(hist, TRAIN_SIZE)
+        train_raw, test_raw = train_test_split(hist, TRAIN_SIZE)
         train_df, scaler = preprocess_for_rnn(train_raw, scaler=scaler)
+        test_df, _ = preprocess_for_rnn(test_raw, scaler=scaler)
         all_features.append(
             torch.tensor(train_df[FEATURE_COLS].values, dtype=torch.float32)
         )
         all_prices.append(train_df["Close"].values)
+        all_test_features.append(
+            torch.tensor(test_df[FEATURE_COLS].values, dtype=torch.float32)
+        )
+        all_test_prices.append(test_df["Close"].values)
 
     # --- networks & optimizer ----------------------------------------------
     online_net = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM, NUM_LAYERS).to(device)
@@ -76,8 +83,42 @@ def train_rnn():
             torch.tensor(d, dtype=torch.float32, device=device),
         )
 
+    def eval_test_raw_return():
+        online_net.eval()
+        all_returns = []
+        with torch.no_grad():
+            for features, prices in zip(all_test_features, all_test_prices):
+                n_data = len(features)
+                if n_data <= SEQ_LEN:
+                    continue
+                cash, volume = float(CASH), 0
+                start_cash = cash
+
+                for idx in range(SEQ_LEN, n_data):
+                    state_seq = features[idx - SEQ_LEN + 1 : idx + 1]
+                    q = online_net(state_seq.unsqueeze(0).to(device))
+                    action = q[0, -1, :].argmax().item()
+                    price_now = prices[idx]
+
+                    if action == 1:
+                        shares = min(int(cash // price_now), 10)
+                        cash -= shares * price_now
+                        volume += shares
+                    elif action == 2:
+                        shares = min(volume, 10)
+                        cash += shares * price_now
+                        volume -= shares
+
+                final_value = cash + volume * prices[-1]
+                all_returns.append((final_value - start_cash) / start_cash)
+        online_net.train()
+        if not all_returns:
+            return float("-inf")
+        return float(np.mean(all_returns))
+
     # --- training loop -----------------------------------------------------
     epsilon = EPSILON
+    best_test_raw_return = float("-inf")
 
     for episode in tqdm(range(NUM_EPISODES), desc="RNN-DQN"):
         ti = random.randint(0, len(TICKERS) - 1)
@@ -155,8 +196,13 @@ def train_rnn():
         if (episode + 1) % TARGET_UPDATE_FREQ == 0:
             target_net.load_state_dict(online_net.state_dict())
 
-    torch.save(online_net.state_dict(), "rnn_q_network.pt")
-    print("Saved rnn_q_network.pt")
+        test_raw_return = eval_test_raw_return()
+        if test_raw_return > best_test_raw_return:
+            best_test_raw_return = test_raw_return
+            torch.save(online_net.state_dict(), "rnn_q_network.pt")
+            print(f"Episode {episode + 1}: new best test raw return = {best_test_raw_return:.4f}")
+
+    print(f"Saved best rnn_q_network.pt (test raw return: {best_test_raw_return:.4f})")
 
 
 
