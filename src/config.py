@@ -1,11 +1,11 @@
 # ── mode ──────────────────────────────────────────────────────────────
-MODE = "rnn"                  # "qlearning" or "rnn"
+MODE = "qlearning"                  # "qlearning" or "rnn"
 
 # ── shared ────────────────────────────────────────────────────────────
 TICKERS = ["GOOG","AAPL","MSFT", "AMZN", "META"]
 PERIOD = "10y"
 DAYS_WINDOW = 5
-CASH = 10000
+CASH = 2000
 VOLUME = 0
 PRICE = None
 TIME = None

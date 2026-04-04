@@ -192,6 +192,12 @@ def train_rnn():
     print(f"Saved best rnn_q_network.pt (test raw return: {best_test_raw_return:.4f})")
 
 
+VOL_CLASS_MAP   = {1: 0, 5: 1, 10: 2, 15: 3, 20: 4}   # raw shares -> class index
+VOL_CLASSES     = [1, 5, 10, 15, 20]                   # index -> shares
+LAMBDA_VOL      = 0.2
+OUTPUT_VOL_DIM  = len(VOL_CLASSES)                     # 5 — update DuelingDQN accordingly
+
+
 def train_qNET():
     # ── Pre-load all tickers ──────────────────────────────────────────────
     all_train_dfs = {}
@@ -246,27 +252,29 @@ def train_qNET():
 
     def get_state(df, idx: int, cash: float, volume: int) -> torch.Tensor:
         row = df.iloc[idx - SEQ_LEN + 1 : idx + 1].values.flatten().astype(np.float32)
-        portfolio = np.array([
-            cash / CASH,
-            float(volume) / 10,
-        ], dtype=np.float32)
+        portfolio = np.array([cash / CASH, float(volume) / 10], dtype=np.float32)
         return torch.tensor(np.concatenate([row, portfolio]), dtype=torch.float32)
 
     def shares_to_vol_class(shares: int) -> int:
-        """Snap executed share count to nearest bucket class index."""
         nearest = min(VOL_CLASSES, key=lambda b: abs(b - shares))
         return VOL_CLASS_MAP[nearest]
 
+    def pick_volume(vol_logits: torch.Tensor, epsilon: float) -> int:
+        """Epsilon-greedy over the volume head. Returns a share count."""
+        if random.random() < epsilon:
+            return random.choice(VOL_CLASSES)
+        return VOL_CLASSES[vol_logits.argmax(dim=-1).item()]
+
     def sample_buffer(batch_size):
         batch = random.sample(buffer, batch_size)
-        s, a, r, s2, d, vc = zip(*batch)   # unpack vol_class too (NEW)
+        s, a, r, s2, d, vc = zip(*batch)
         return (
             torch.stack(s).to(device),
             torch.tensor(a,  dtype=torch.long,    device=device),
             torch.tensor(r,  dtype=torch.float32, device=device),
             torch.stack(s2).to(device),
             torch.tensor(d,  dtype=torch.float32, device=device),
-            torch.tensor(vc, dtype=torch.long,    device=device),  # NEW
+            torch.tensor(vc, dtype=torch.long,    device=device),
         )
 
     for episode in tqdm(range(NUM_EPISODES_QL), desc="Dueling DQN"):
@@ -281,35 +289,29 @@ def train_qNET():
         for t in range(idx, T):
             state = get_state(train_df[FEATURE_COLS], t, cash, volume)
 
+            # ── Joint epsilon-greedy for action AND volume ────────────────────
             if random.random() < epsilon:
-                action = random.randrange(len(ACTIONS))
+                action      = random.randrange(len(ACTIONS))
+                pred_shares = random.choice(VOL_CLASSES)          # volume exploration
             else:
                 q_net.eval()
                 with torch.no_grad():
                     q_net.reset_noise()
-                    s_t    = state.unsqueeze(0).to(device)
-                    q_vals, _ = q_net(s_t)        # unpack tuple (NEW)
-                    action = q_vals.argmax(dim=1).item()
+                    s_t = state.unsqueeze(0).to(device)
+                    q_vals, vol_logits = q_net(s_t)
+                    action      = q_vals.argmax(dim=1).item()
+                    pred_shares = pick_volume(vol_logits, epsilon) # volume also ε-greedy
                 q_net.train()
 
             price_now = train_df["Close"].iloc[t]
             shares    = 0
 
-            # ── Decode predicted share count from volume logits ──────────────
-            # During epsilon-greedy exploration we don't have logits, so we
-            # fall back to the network's prediction for the share count.
-            with torch.no_grad():
-                q_net.reset_noise()
-                _, vol_logits_now = q_net(state.unsqueeze(0).to(device))
-                pred_vol_idx = vol_logits_now.argmax(dim=-1).item()   # 0–3
-            pred_shares = VOL_CLASSES[pred_vol_idx]                   # 5/10/15/20
-
             if action == 1 and cash >= price_now:
-                shares  = min(pred_shares, int(cash // price_now))    # respect budget
+                shares  = min(pred_shares, int(cash // price_now))
                 cash   -= shares * price_now
                 volume += shares
             elif action == 2 and volume > 0:
-                shares  = min(pred_shares, volume)                    # can't sell more than held
+                shares  = min(pred_shares, volume)
                 cash   += shares * price_now
                 volume -= shares
 
@@ -317,8 +319,7 @@ def train_qNET():
             next_state = get_state(train_df[FEATURE_COLS], t + 1, cash, volume)
             done       = (t == T - 1)
 
-            # Store vol_class alongside the transition (NEW)
-            vol_class = shares_to_vol_class(shares) if shares > 0 else VOL_CLASS_MAP[5]
+            vol_class = shares_to_vol_class(shares) if shares > 0 else VOL_CLASS_MAP[1]
             buffer.append([state, action, reward, next_state, done, vol_class])
 
         if len(buffer) < WARMUP_STEPS:
@@ -329,19 +330,14 @@ def train_qNET():
         q_net.reset_noise()
         target_net.reset_noise()
 
-        # Forward passes — both return (q_values, vol_logits) (NEW)
-        q_values,     vol_logits      = q_net(states)
-        next_q_online, _              = q_net(next_states)
+        q_values,      vol_logits = q_net(states)
+        next_q_online, _          = q_net(next_states)
         with torch.no_grad():
-            next_q_target, _          = target_net(next_states)
+            next_q_target, _      = target_net(next_states)
 
-        # ── TD loss ──────────────────────────────────────────────────────────
-        td_loss = dqn_loss(q_values, actions, rewards, next_q_online, next_q_target, dones, GAMMA)
-
-        # ── Volume classification loss (NEW) ─────────────────────────────────
+        td_loss  = dqn_loss(q_values, actions, rewards, next_q_online, next_q_target, dones, GAMMA)
         vol_loss = F.cross_entropy(vol_logits, vol_classes)
-
-        loss = td_loss + LAMBDA_VOL * vol_loss
+        loss     = td_loss + LAMBDA_VOL * vol_loss
 
         optimizer.zero_grad()
         loss.backward()
