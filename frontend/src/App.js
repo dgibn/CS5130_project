@@ -5,7 +5,18 @@ import {
 } from "recharts";
 import "./App.css";
 
-const API = "http://localhost:8000";
+const API = "https://dooly-melanoid-gerald.ngrok-free.dev";
+
+/** ngrok free tier: avoid HTML interstitial blocking fetch() */
+const API_HEADERS = { "ngrok-skip-browser-warning": "true" };
+
+function apiFetch(url, options = {}) {
+  return fetch(url, {
+    ...options,
+    headers: { ...API_HEADERS, ...(options.headers || {}) },
+  });
+}
+
 const TICKERS = ["GOOGL", "AAPL", "MSFT", "AMZN", "META"];
 const COLORS = {
   GOOGL: "#ea4335", AAPL: "#2ecc71", MSFT: "#9b59b6",
@@ -58,7 +69,7 @@ function App() {
 
   // Check API on mount
   useEffect(() => {
-    fetch(`${API}/api/tickers`)
+    apiFetch(`${API}/api/tickers`)
       .then((r) => r.json())
       .then(() => setApiOnline(true))
       .catch(() => setApiOnline(false));
@@ -72,8 +83,8 @@ function App() {
     setPriceData(null);
     setPrediction(null);
     Promise.all([
-      fetch(`${API}/api/price/${selectedTicker}?period=6mo`).then((r) => r.json()),
-      fetch(`${API}/api/predict/${selectedTicker}`).then((r) => r.json()),
+      apiFetch(`${API}/api/price/${selectedTicker}?period=6mo`).then((r) => r.json()),
+      apiFetch(`${API}/api/predict/${selectedTicker}`).then((r) => r.json()),
     ])
       .then(([price, pred]) => {
         setPriceData(price);
@@ -88,7 +99,7 @@ function App() {
     if (!apiOnline || tab !== "backtest") return;
     setLoading(true);
     setBacktestData(null);
-    fetch(`${API}/api/backtest/${selectedTicker}?initial_cash=2000`)
+    apiFetch(`${API}/api/backtest/${selectedTicker}?initial_cash=2000`)
       .then((r) => r.json())
       .then((data) => { setBacktestData(data); setLoading(false); })
       .catch((e) => { setError(e.message); setLoading(false); });
@@ -99,7 +110,7 @@ function App() {
     if (!apiOnline || tab !== "portfolio") return;
     setLoading(true);
     setPortfolioSummary(null);
-    fetch(`${API}/api/portfolio/summary`)
+    apiFetch(`${API}/api/portfolio/summary`)
       .then((r) => r.json())
       .then((data) => { setPortfolioSummary(data); setLoading(false); })
       .catch((e) => { setError(e.message); setLoading(false); });
@@ -111,8 +122,8 @@ function App() {
       <div className="offline-screen">
         <div style={{ fontSize: 48 }}>⚡</div>
         <h2>API Offline</h2>
-        <p>Start the backend server first:</p>
-        <code>python api.py</code>
+        <p>Start the backend and ngrok tunnel, or check the API URL in App.js.</p>
+        <code>cd src && python api.py</code>
         <p style={{ marginTop: 12, fontSize: 13, color: "#64748b" }}>
           Then refresh this page.
         </p>
@@ -347,7 +358,7 @@ function App() {
                     setLoading(true);
                     setSimData(null);
                     setError(null);
-                    fetch(`${API}/api/simulate/${selectedTicker}?days=${simDays}&initial_cash=${simCash}&n_simulations=50`)
+                    apiFetch(`${API}/api/simulate/${selectedTicker}?days=${simDays}&initial_cash=${simCash}&n_simulations=50`)
                       .then((r) => r.json())
                       .then((data) => { setSimData(data); setLoading(false); })
                       .catch((e) => { setError(e.message); setLoading(false); });
