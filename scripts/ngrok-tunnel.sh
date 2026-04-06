@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Tunnel the local Trading API to the internet via ngrok.
 #
+# To start API + ngrok together, use instead:
+#   ./scripts/start-api-and-ngrok.sh
+#
+# This script is for when the API is already running.
+#
 # 1. Start the API (separate terminal):
 #      cd src && python api.py
 #    Or: cd src && uvicorn api:app --host 0.0.0.0 --port 8000

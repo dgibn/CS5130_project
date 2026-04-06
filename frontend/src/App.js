@@ -17,10 +17,33 @@ function apiFetch(url, options = {}) {
   });
 }
 
-const TICKERS = ["GOOGL", "AAPL", "MSFT", "AMZN", "META"];
+/** Parse JSON and throw if status is not OK (FastAPI returns { detail: ... }). */
+function readApiJson(response) {
+  return response.json().then((data) => {
+    if (!response.ok) {
+      const d = data?.detail;
+      const msg = Array.isArray(d)
+        ? d.map((x) => x.msg ?? JSON.stringify(x)).join("; ")
+        : (d ?? response.statusText);
+      throw new Error(String(msg));
+    }
+    return data;
+  });
+}
+
+/** Must match backend [config.TICKERS](src/config.py) for portfolio keys */
+const TICKERS = ["GOOG", "AAPL", "MSFT", "AMZN", "META"];
+
+/** Same as /api/backtest and /api/portfolio/summary query params */
+const PORTFOLIO_INITIAL_CASH = 2000;
+const PORTFOLIO_TEST_DAYS = 100;
 const COLORS = {
-  GOOGL: "#ea4335", AAPL: "#2ecc71", MSFT: "#9b59b6",
-  AMZN: "#f39c12", META: "#3498db",
+  GOOG: "#ea4335",
+  GOOGL: "#ea4335",
+  AAPL: "#2ecc71",
+  MSFT: "#9b59b6",
+  AMZN: "#f39c12",
+  META: "#3498db",
 };
 
 function ActionBadge({ action }) {
@@ -60,9 +83,6 @@ function App() {
   const [prediction, setPrediction] = useState(null);
   const [backtestData, setBacktestData] = useState(null);
   const [portfolioSummary, setPortfolioSummary] = useState(null);
-  const [simData, setSimData] = useState(null);
-  const [simDays, setSimDays] = useState(10);
-  const [simCash, setSimCash] = useState(10000);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [apiOnline, setApiOnline] = useState(null);
@@ -70,50 +90,92 @@ function App() {
   // Check API on mount
   useEffect(() => {
     apiFetch(`${API}/api/tickers`)
-      .then((r) => r.json())
+      .then(readApiJson)
       .then(() => setApiOnline(true))
       .catch(() => setApiOnline(false));
   }, []);
 
-  // Fetch price + prediction when ticker changes
+  // Chart tab only: avoids running /predict while on other tabs (shared error + loading fights portfolio/backtest).
+  // allSettled: price chart still loads if predict fails.
   useEffect(() => {
-    if (!apiOnline) return;
+    if (!apiOnline || tab !== "chart") return;
+    let cancelled = false;
     setLoading(true);
     setError(null);
     setPriceData(null);
     setPrediction(null);
-    Promise.all([
-      apiFetch(`${API}/api/price/${selectedTicker}?period=6mo`).then((r) => r.json()),
-      apiFetch(`${API}/api/predict/${selectedTicker}`).then((r) => r.json()),
-    ])
-      .then(([price, pred]) => {
-        setPriceData(price);
-        setPrediction(pred);
-        setLoading(false);
-      })
-      .catch((e) => { setError(e.message); setLoading(false); });
-  }, [selectedTicker, apiOnline]);
+    Promise.allSettled([
+      apiFetch(`${API}/api/price/${selectedTicker}?period=6mo`).then(readApiJson),
+      apiFetch(`${API}/api/predict/${selectedTicker}`).then(readApiJson),
+    ]).then(([priceResult, predResult]) => {
+      if (cancelled) return;
+      if (priceResult.status === "fulfilled") {
+        setPriceData(priceResult.value);
+      } else {
+        setError(priceResult.reason?.message || "Failed to load price data");
+      }
+      if (predResult.status === "fulfilled") {
+        setPrediction(predResult.value);
+      } else {
+        setPrediction(null);
+      }
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTicker, apiOnline, tab]);
 
   // Fetch backtest when tab = backtest
   useEffect(() => {
     if (!apiOnline || tab !== "backtest") return;
+    let cancelled = false;
+    setError(null);
     setLoading(true);
     setBacktestData(null);
-    apiFetch(`${API}/api/backtest/${selectedTicker}?initial_cash=2000`)
-      .then((r) => r.json())
-      .then((data) => { setBacktestData(data); setLoading(false); })
-      .catch((e) => { setError(e.message); setLoading(false); });
+    apiFetch(
+      `${API}/api/backtest/${selectedTicker}?initial_cash=${PORTFOLIO_INITIAL_CASH}&test_days=${PORTFOLIO_TEST_DAYS}`,
+    )
+      .then(readApiJson)
+      .then((data) => {
+        if (cancelled) return;
+        setBacktestData(data);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e.message);
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedTicker, tab, apiOnline]);
 
   // Fetch portfolio summary when tab = portfolio
   useEffect(() => {
     if (!apiOnline || tab !== "portfolio") return;
+    let cancelled = false;
+    setError(null);
     setLoading(true);
     setPortfolioSummary(null);
-    apiFetch(`${API}/api/portfolio/summary`)
-      .then((r) => r.json())
-      .then((data) => { setPortfolioSummary(data); setLoading(false); })
-      .catch((e) => { setError(e.message); setLoading(false); });
+    apiFetch(
+      `${API}/api/portfolio/summary?initial_cash=${PORTFOLIO_INITIAL_CASH}&test_days=${PORTFOLIO_TEST_DAYS}`,
+    )
+      .then(readApiJson)
+      .then((data) => {
+        if (cancelled) return;
+        setPortfolioSummary(data);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e.message);
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [tab, apiOnline]);
 
   // ── API Offline ──
@@ -148,7 +210,7 @@ function App() {
           <span className="live-badge">LIVE</span>
         </div>
         <nav className="tabs">
-          {["chart", "backtest", "simulate", "portfolio"].map((t) => (
+          {["chart", "backtest", "portfolio"].map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -161,23 +223,25 @@ function App() {
       </header>
 
       <main className="main">
-        {/* ── TICKER SELECTOR ── */}
-        <div className="ticker-bar">
-          {TICKERS.map((t) => (
-            <button
-              key={t}
-              onClick={() => setSelectedTicker(t)}
-              className="ticker-btn"
-              style={{
-                background: selectedTicker === t ? COLORS[t] : "#1a1a2e",
-                color: selectedTicker === t ? "#fff" : "#94a3b8",
-                borderColor: selectedTicker === t ? COLORS[t] : "#2a2a4a",
-              }}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
+        {/* ── TICKER SELECTOR (portfolio covers all tickers; no per-ticker switch) ── */}
+        {tab !== "portfolio" && (
+          <div className="ticker-bar">
+            {TICKERS.map((t) => (
+              <button
+                key={t}
+                onClick={() => setSelectedTicker(t)}
+                className="ticker-btn"
+                style={{
+                  background: selectedTicker === t ? (COLORS[t] ?? "#64748b") : "#1a1a2e",
+                  color: selectedTicker === t ? "#fff" : "#94a3b8",
+                  borderColor: selectedTicker === t ? (COLORS[t] ?? "#64748b") : "#2a2a4a",
+                }}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        )}
 
         {error && <div className="error-banner">Error: {error}</div>}
 
@@ -201,8 +265,8 @@ function App() {
                     <AreaChart data={priceData.history}>
                       <defs>
                         <linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={COLORS[selectedTicker]} stopOpacity={0.3} />
-                          <stop offset="95%" stopColor={COLORS[selectedTicker]} stopOpacity={0} />
+                          <stop offset="5%" stopColor={COLORS[selectedTicker] ?? "#64748b"} stopOpacity={0.3} />
+                          <stop offset="95%" stopColor={COLORS[selectedTicker] ?? "#64748b"} stopOpacity={0} />
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="#2a2a4a" />
@@ -213,7 +277,7 @@ function App() {
                         background: "#1a1a2e", border: "1px solid #2a2a4a", borderRadius: 10,
                         color: "#e2e8f0",
                       }} />
-                      <Area type="monotone" dataKey="close" stroke={COLORS[selectedTicker]}
+                      <Area type="monotone" dataKey="close" stroke={COLORS[selectedTicker] ?? "#64748b"}
                         fill="url(#cg)" strokeWidth={2} dot={false} />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -222,10 +286,16 @@ function App() {
             </Card>
 
             {/* Signal panel */}
-            <div className="signal-col">
+                <div className="signal-col">
               <Card>
                 <div className="section-label">D3QN LIVE SIGNAL</div>
-                {!prediction ? (
+                {loading ? (
+                  <Spinner />
+                ) : !prediction && priceData ? (
+                  <p style={{ color: "#94a3b8", fontSize: 14 }}>
+                    Trading signal unavailable (check API /api/predict). Price data loaded.
+                  </p>
+                ) : !prediction ? (
                   <Spinner />
                 ) : (
                   <>
@@ -235,17 +305,22 @@ function App() {
                         {prediction.confidence}% confidence
                       </span>
                     </div>
+                    {prediction.predicted_volume != null && (
+                      <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 12 }}>
+                        Predicted next trade size: <strong style={{ color: "#e2e8f0" }}>{prediction.predicted_volume}</strong> shares
+                      </div>
+                    )}
                     <div className="q-label">Q-VALUES (from model)</div>
-                    {Object.entries(prediction.q_values).map(([k, v]) => (
+                    {Object.entries(prediction.q_values ?? {}).map(([k, v]) => (
                       <div key={k} className="q-row">
                         <span className="q-name">{k}</span>
                         <span className={`q-val ${v > 0 ? "pos" : v < 0 ? "neg" : ""}`}>
-                          {v > 0 ? "+" : ""}{v.toFixed(4)}
+                          {typeof v === "number" ? `${v > 0 ? "+" : ""}${v.toFixed(4)}` : String(v)}
                         </span>
                       </div>
                     ))}
                     <div className="model-info">
-                      Price: ${prediction.price} | Model: D3QN (Generalized)
+                      Price: ${prediction.price ?? "—"} | Dueling DQN + volume head
                     </div>
                   </>
                 )}
@@ -312,181 +387,6 @@ function App() {
           </Card>
         )}
 
-        {/* ══════════════ SIMULATE TAB ══════════════ */}
-        {tab === "simulate" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-            {/* Input controls */}
-            <Card>
-              <div className="section-label">FORWARD SIMULATION SETTINGS</div>
-              <div style={{ display: "flex", gap: 24, alignItems: "flex-end", flexWrap: "wrap" }}>
-                <div>
-                  <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 6 }}>
-                    Investment Amount ($)
-                  </label>
-                  <input
-                    type="number"
-                    value={simCash}
-                    onChange={(e) => setSimCash(Number(e.target.value))}
-                    min={100}
-                    max={1000000}
-                    style={{
-                      background: "#0f0f23", border: "1px solid #2a2a4a", borderRadius: 10,
-                      padding: "10px 16px", color: "#e2e8f0", fontSize: 16, fontWeight: 700,
-                      width: 180, fontFamily: "monospace",
-                    }}
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 6 }}>
-                    Days Forward
-                  </label>
-                  <input
-                    type="number"
-                    value={simDays}
-                    onChange={(e) => setSimDays(Number(e.target.value))}
-                    min={1}
-                    max={60}
-                    style={{
-                      background: "#0f0f23", border: "1px solid #2a2a4a", borderRadius: 10,
-                      padding: "10px 16px", color: "#e2e8f0", fontSize: 16, fontWeight: 700,
-                      width: 120, fontFamily: "monospace",
-                    }}
-                  />
-                </div>
-                <button
-                  onClick={() => {
-                    setLoading(true);
-                    setSimData(null);
-                    setError(null);
-                    apiFetch(`${API}/api/simulate/${selectedTicker}?days=${simDays}&initial_cash=${simCash}&n_simulations=50`)
-                      .then((r) => r.json())
-                      .then((data) => { setSimData(data); setLoading(false); })
-                      .catch((e) => { setError(e.message); setLoading(false); });
-                  }}
-                  style={{
-                    padding: "10px 28px", borderRadius: 10, border: "none", cursor: "pointer",
-                    background: "linear-gradient(135deg, #c3f73a, #95d600)",
-                    color: "#0f0f23", fontSize: 15, fontWeight: 800,
-                    letterSpacing: 0.5,
-                  }}
-                >
-                  Run Simulation
-                </button>
-              </div>
-              <div style={{ marginTop: 10, fontSize: 11, color: "#64748b" }}>
-                Uses Monte Carlo simulation (50 paths) with D3QN agent decisions on each path.
-              </div>
-            </Card>
-
-            {loading && <Spinner />}
-
-            {simData && !loading && (
-              <>
-                {/* Summary cards */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                  <Card>
-                    <div className="stat-label">Expected Portfolio</div>
-                    <div className="big-value accent-green">
-                      ${simData.final_avg_portfolio.toLocaleString()}
-                    </div>
-                    <div className={simData.expected_return >= 0 ? "stat-ret pos" : "stat-ret neg"}>
-                      {simData.expected_return >= 0 ? "+" : ""}{simData.expected_return}%
-                    </div>
-                  </Card>
-                  <Card>
-                    <div className="stat-label">Best Case</div>
-                    <div className="big-value" style={{ color: "#2ecc71" }}>
-                      ${simData.final_best_portfolio.toLocaleString()}
-                    </div>
-                    <div className="stat-ret pos">
-                      +{((simData.final_best_portfolio / simData.initial_cash - 1) * 100).toFixed(2)}%
-                    </div>
-                  </Card>
-                  <Card>
-                    <div className="stat-label">Worst Case</div>
-                    <div className="big-value" style={{ color: "#e74c3c" }}>
-                      ${simData.final_worst_portfolio.toLocaleString()}
-                    </div>
-                    <div className="stat-ret neg">
-                      {((simData.final_worst_portfolio / simData.initial_cash - 1) * 100).toFixed(2)}%
-                    </div>
-                  </Card>
-                </div>
-
-                {/* Portfolio trajectory chart */}
-                <Card>
-                  <div className="section-label">
-                    PROJECTED PORTFOLIO — {selectedTicker} — {simData.days} Days — ${simData.initial_cash.toLocaleString()}
-                  </div>
-                  <ResponsiveContainer width="100%" height={350}>
-                    <AreaChart data={simData.trajectory}>
-                      <defs>
-                        <linearGradient id="simGrad" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#c3f73a" stopOpacity={0.2} />
-                          <stop offset="95%" stopColor="#c3f73a" stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#2a2a4a" />
-                      <XAxis dataKey="day" tick={{ fill: "#64748b", fontSize: 11 }}
-                        label={{ value: "Day", position: "insideBottom", offset: -5, fill: "#64748b" }} />
-                      <YAxis tick={{ fill: "#64748b", fontSize: 11 }}
-                        domain={["auto", "auto"]} />
-                      <Tooltip contentStyle={{
-                        background: "#1a1a2e", border: "1px solid #2a2a4a",
-                        borderRadius: 10, color: "#e2e8f0",
-                      }}
-                        formatter={(v) => [`${Number(v).toLocaleString()}`, ""]}
-                      />
-                      <Area type="monotone" dataKey="best_portfolio" stroke="transparent"
-                        fill="#2ecc71" fillOpacity={0.08} name="Best case" />
-                      <Area type="monotone" dataKey="p75_portfolio" stroke="transparent"
-                        fill="#c3f73a" fillOpacity={0.1} name="75th percentile" />
-                      <Line type="monotone" dataKey="avg_portfolio" stroke="#c3f73a"
-                        strokeWidth={2.5} dot={false} name="Expected" />
-                      <Area type="monotone" dataKey="p25_portfolio" stroke="transparent"
-                        fill="#f39c12" fillOpacity={0.08} name="25th percentile" />
-                      <Area type="monotone" dataKey="worst_portfolio" stroke="transparent"
-                        fill="#e74c3c" fillOpacity={0.08} name="Worst case" />
-                      <Legend />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </Card>
-
-                {/* Day-by-day actions table */}
-                <Card>
-                  <div className="section-label">D3QN AGENT'S PREDICTED ACTIONS</div>
-                  <div style={{ maxHeight: 300, overflowY: "auto" }}>
-                    <table className="results-table">
-                      <thead>
-                        <tr>
-                          <th style={{ textAlign: "left" }}>Day</th>
-                          <th>Action</th>
-                          <th>Avg Price</th>
-                          <th>Expected Value</th>
-                          <th>Best Case</th>
-                          <th>Worst Case</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {simData.trajectory.slice(1).map((row) => (
-                          <tr key={row.day}>
-                            <td style={{ textAlign: "left" }}>Day {row.day}</td>
-                            <td><ActionBadge action={row.action} /></td>
-                            <td className="mono">${row.avg_price.toLocaleString()}</td>
-                            <td className="mono">${row.avg_portfolio.toLocaleString()}</td>
-                            <td className="mono pos">${row.best_portfolio.toLocaleString()}</td>
-                            <td className="mono neg">${row.worst_portfolio.toLocaleString()}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </Card>
-              </>
-            )}
-          </div>
-        )}
-
         {/* ══════════════ PORTFOLIO TAB ══════════════ */}
         {tab === "portfolio" && (
           <>
@@ -496,7 +396,9 @@ function App() {
               <div className="portfolio-grid">
                 {/* Summary */}
                 <Card>
-                  <div className="section-label">TOTAL PORTFOLIO (5 × $2,000)</div>
+                  <div className="section-label">
+                    TOTAL PORTFOLIO ({TICKERS.length} × ${PORTFOLIO_INITIAL_CASH.toLocaleString()} — {PORTFOLIO_TEST_DAYS}d backtest each)
+                  </div>
                   <div className="summary-row">
                     <div>
                       <div className="stat-label">D3QN</div>
@@ -512,8 +414,8 @@ function App() {
                       <div className="big-value accent-orange">
                         ${portfolioSummary.total_bh.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                       </div>
-                      <div className="stat-ret orange">
-                        +{portfolioSummary.total_bh_return}%
+                      <div className={portfolioSummary.total_bh_return >= 0 ? "stat-ret orange" : "stat-ret neg"}>
+                        {portfolioSummary.total_bh_return >= 0 ? "+" : ""}{portfolioSummary.total_bh_return}%
                       </div>
                     </div>
                   </div>
@@ -523,11 +425,14 @@ function App() {
                 <Card>
                   <div className="section-label">RETURN COMPARISON (%)</div>
                   <ResponsiveContainer width="100%" height={200}>
-                    <BarChart data={TICKERS.map((t) => ({
-                      ticker: t,
-                      D3QN: portfolioSummary.tickers[t].dqn_ret,
-                      "Buy&Hold": portfolioSummary.tickers[t].bh_ret,
-                    }))}>
+                    <BarChart data={TICKERS.map((t) => {
+                      const row = portfolioSummary.tickers[t];
+                      return {
+                        ticker: t,
+                        D3QN: row?.dqn_ret ?? 0,
+                        "Buy&Hold": row?.bh_ret ?? 0,
+                      };
+                    })}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#2a2a4a" />
                       <XAxis dataKey="ticker" tick={{ fill: "#94a3b8", fontSize: 12 }} />
                       <YAxis tick={{ fill: "#64748b", fontSize: 11 }} />
@@ -559,10 +464,26 @@ function App() {
                     <tbody>
                       {TICKERS.map((t) => {
                         const r = portfolioSummary.tickers[t];
+                        if (!r) {
+                          return (
+                            <tr key={t}>
+                              <td style={{ fontWeight: 700, color: COLORS[t] ?? "#94a3b8" }}>{t}</td>
+                              <td colSpan={5} style={{ color: "#64748b" }}>No data (ticker mismatch with API)</td>
+                            </tr>
+                          );
+                        }
+                        if (r.error) {
+                          return (
+                            <tr key={t}>
+                              <td style={{ fontWeight: 700, color: COLORS[t] ?? "#94a3b8" }}>{t}</td>
+                              <td colSpan={5} style={{ color: "#f87171", fontSize: 13 }}>{r.error}</td>
+                            </tr>
+                          );
+                        }
                         const alpha = (r.dqn_ret - r.bh_ret).toFixed(2);
                         return (
                           <tr key={t}>
-                            <td style={{ fontWeight: 700, color: COLORS[t] }}>{t}</td>
+                            <td style={{ fontWeight: 700, color: COLORS[t] ?? "#94a3b8" }}>{t}</td>
                             <td className="mono">${r.dqn.toLocaleString()}</td>
                             <td className={`mono bold ${r.dqn_ret >= 0 ? "pos" : "neg"}`}>
                               {r.dqn_ret >= 0 ? "+" : ""}{r.dqn_ret}%
@@ -571,8 +492,8 @@ function App() {
                             <td className={`mono bold ${r.bh_ret >= 0 ? "orange" : "neg"}`}>
                               {r.bh_ret >= 0 ? "+" : ""}{r.bh_ret}%
                             </td>
-                            <td className={`mono bold ${alpha >= 0 ? "accent" : "neg"}`}>
-                              {alpha >= 0 ? "+" : ""}{alpha}%
+                            <td className={`mono bold ${Number(alpha) >= 0 ? "accent" : "neg"}`}>
+                              {Number(alpha) >= 0 ? "+" : ""}{alpha}%
                             </td>
                           </tr>
                         );

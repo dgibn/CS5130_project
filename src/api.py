@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import warnings
-from collections import Counter
 from typing import Tuple
 
 import numpy as np
@@ -25,9 +24,10 @@ import torch.nn.functional as F
 import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sklearn.preprocessing import StandardScaler
 
-from config import ACTIONS, CASH, INPUT_DIM, SEQ_LEN, TICKERS, TRAIN_SIZE
-from dataloader import FEATURE_COLS, train_test_split
+from config import ACTIONS, CASH, INPUT_DIM, SEQ_LEN, TICKERS
+from dataloader import FEATURE_COLS, _add_features
 from dataloader_rnn import preprocess_for_rnn
 from DQN import DuelingDQN
 
@@ -106,15 +106,77 @@ def get_state(df: pd.DataFrame, idx: int, cash: float, volume: int) -> torch.Ten
     return torch.tensor(np.concatenate([row, portfolio]), dtype=torch.float32)
 
 
-def fetch_test_df(ticker: str, period: str) -> Tuple[pd.DataFrame, np.ndarray]:
-    hist = yf.Ticker(ticker).history(period=period)
-    hist.reset_index(inplace=True)
-    if hist.empty:
+# Longer periods are not always more reliable with yfinance; try several until SEQ_LEN rows remain.
+_INFERENCE_PERIODS = ("max", "10y", "5y", "2y", "1y", "6mo")
+
+
+def _normalize_yfinance_hist(hist: pd.DataFrame) -> pd.DataFrame:
+    """Flatten MultiIndex columns so Close/Volume are accessible (single-ticker edge cases)."""
+    if hist.empty or not isinstance(hist.columns, pd.MultiIndex):
+        return hist
+    for level in (0, -1):
+        names = hist.columns.get_level_values(level)
+        if "Close" in names and "Volume" in names:
+            out = hist.copy()
+            out.columns = names
+            return out
+    return hist
+
+
+def _preprocess_for_inference(hist: pd.DataFrame) -> Tuple[pd.DataFrame, StandardScaler]:
+    """Like preprocess_for_rnn but replaces inf before scaling (API inference only)."""
+    df = _add_features(hist.copy())
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna().reset_index(drop=True)
+    scaler = StandardScaler()
+    df[FEATURE_COLS] = scaler.fit_transform(df[FEATURE_COLS])
+    return df, scaler
+
+
+def fetch_inference_df(ticker: str) -> Tuple[pd.DataFrame, np.ndarray]:
+    """
+    Full history for live /predict (no train–test split).
+
+    Tries multiple yfinance periods until preprocessing yields len >= SEQ_LEN.
+    """
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+
+    last_exc: Exception | None = None
+    saw_nonempty = False
+
+    for period in _INFERENCE_PERIODS:
+        try:
+            hist = yf.Ticker(ticker).history(period=period)
+            hist = hist.reset_index(drop=False)
+            hist = _normalize_yfinance_hist(hist)
+            logger.info(f"[predict] {ticker} period={period} rows={len(hist)} cols={list(hist.columns)[:6]}")
+            if hist.empty:
+                continue
+            saw_nonempty = True
+            if "Close" not in hist.columns or "Volume" not in hist.columns:
+                logger.warning(f"[predict] {ticker} period={period}: missing Close/Volume in {list(hist.columns)}")
+                continue
+            test_df, _ = _preprocess_for_inference(hist)
+            logger.info(f"[predict] {ticker} period={period} after preprocess rows={len(test_df)}")
+            if len(test_df) >= SEQ_LEN:
+                return test_df, test_df["Close"].values
+        except Exception as e:
+            logger.warning(f"[predict] {ticker} period={period} exception: {e}")
+            last_exc = e
+            continue
+
+    if not saw_nonempty:
         raise HTTPException(status_code=404, detail=f"No data for {ticker}")
-    _, test_raw = train_test_split(hist, TRAIN_SIZE)
-    test_df, _ = preprocess_for_rnn(test_raw)
-    prices = test_df["Close"].values
-    return test_df, prices
+    if last_exc is not None:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch {ticker}: {last_exc}")
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Not enough rows after preprocessing (need at least {SEQ_LEN}). "
+            "Tried multiple history periods."
+        ),
+    )
 
 
 @torch.no_grad()
@@ -182,6 +244,48 @@ def run_trading_episode(
     return portfolio, portfolio[-1]["value"]
 
 
+def _execute_backtest(ticker: str, initial_cash: float, test_days: int) -> dict:
+    """
+    Shared pipeline for /api/backtest and /api/portfolio/summary.
+    Raises ValueError on failure (message used for HTTP detail or per-ticker error).
+    """
+    t = ticker.upper()
+    try:
+        hist = yf.Ticker(t).history(period="5y")
+        hist.reset_index(inplace=True)
+    except Exception as e:
+        raise ValueError(f"Failed to fetch {t}: {e}") from e
+
+    if hist.empty:
+        raise ValueError(f"No data for {t}")
+
+    needed_raw = test_days + SEQ_LEN + 60
+    test_raw = hist.tail(needed_raw).reset_index(drop=True)
+    test_df, _ = preprocess_for_rnn(test_raw)
+    prices = test_df["Close"].values
+
+    portfolio, dqn_final = run_trading_episode(test_df, prices, initial_cash)
+    if not portfolio:
+        raise ValueError("Insufficient data for backtest")
+
+    first_price = float(prices[SEQ_LEN])
+    last_price = float(prices[-1])
+    bh_shares = int(initial_cash // first_price)
+    bh_residual = initial_cash - bh_shares * first_price
+    bh_final = bh_shares * last_price + bh_residual
+
+    return {
+        "ticker": t,
+        "initial_cash": initial_cash,
+        "dqn_final": round(float(dqn_final), 2),
+        "bh_final": round(float(bh_final), 2),
+        "dqn_return": round((float(dqn_final) / initial_cash - 1) * 100, 2),
+        "bh_return": round((bh_final / initial_cash - 1) * 100, 2),
+        "test_days": len(portfolio),
+        "portfolio": portfolio,
+    }
+
+
 # ──────────────────────────────────────────────
 # ROUTES
 # ──────────────────────────────────────────────
@@ -242,17 +346,11 @@ async def get_prediction(
     vol = 0 if shares is None else int(shares)
 
     try:
-        test_df, prices = fetch_test_df(ticker, "1y")
+        test_df, prices = fetch_inference_df(ticker)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch {ticker}: {e}")
-
-    if len(test_df) <= SEQ_LEN:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Not enough rows after preprocessing (need > {SEQ_LEN})",
-        )
 
     idx = len(test_df) - 1
     state = get_state(test_df[FEATURE_COLS], idx, c, vol)
@@ -286,247 +384,51 @@ async def get_prediction(
 
 
 @app.get("/api/backtest/{ticker}")
-async def get_backtest(ticker: str, initial_cash: float = 10000):
-    ticker = ticker.upper()
+async def get_backtest(ticker: str, initial_cash: float = 10000, test_days: int = 100):
     try:
-        hist = yf.Ticker(ticker).history(period="2y")
-        hist.reset_index(inplace=True)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch {ticker}: {e}")
-
-    if hist.empty:
-        raise HTTPException(status_code=404, detail=f"No data for {ticker}")
-
-    split = int(len(hist) * TRAIN_SIZE)
-    test_raw = hist.iloc[split:].reset_index(drop=True)
-    test_df, _ = preprocess_for_rnn(test_raw)
-    prices = test_df["Close"].values
-
-    portfolio, dqn_final = run_trading_episode(test_df, prices, initial_cash)
-
-    if not portfolio:
-        raise HTTPException(status_code=400, detail="Insufficient data for backtest")
-
-    first_price = float(prices[SEQ_LEN])
-    last_price = float(prices[-1])
-    bh_shares = int(initial_cash // first_price)
-    bh_residual = initial_cash - bh_shares * first_price
-    bh_final = bh_shares * last_price + bh_residual
-
-    return {
-        "ticker": ticker,
-        "initial_cash": initial_cash,
-        "dqn_final": round(float(dqn_final), 2),
-        "bh_final": round(float(bh_final), 2),
-        "dqn_return": round((float(dqn_final) / initial_cash - 1) * 100, 2),
-        "bh_return": round((bh_final / initial_cash - 1) * 100, 2),
-        "test_days": len(portfolio),
-        "portfolio": portfolio,
-    }
-
-
-@app.get("/api/simulate/{ticker}")
-async def simulate_forward(
-    ticker: str,
-    days: int = 10,
-    initial_cash: float = 10000,
-    n_simulations: int = 50,
-):
-    ticker = ticker.upper()
-    if days < 1 or days > 60:
-        raise HTTPException(status_code=400, detail="Days must be between 1 and 60")
-
-    try:
-        hist = yf.Ticker(ticker).history(period="1y")
-        hist.reset_index(inplace=True)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch {ticker}: {e}")
-
-    if hist.empty:
-        raise HTTPException(status_code=404, detail=f"No data for {ticker}")
-
-    close = hist["Close"].values
-    log_returns = np.diff(np.log(close))
-    mu = float(np.mean(log_returns))
-    sigma = float(np.std(log_returns))
-    last_price = float(close[-1])
-
-    all_paths = []
-    for _ in range(n_simulations):
-        prices_path = [last_price]
-        for _d in range(days):
-            shock = np.random.normal(mu, sigma)
-            prices_path.append(prices_path[-1] * np.exp(shock))
-        all_paths.append(prices_path)
-
-    hist_tail = hist.tail(60).copy()
-    all_portfolios: list = []
-    all_actions: list = []
-
-    for path in all_paths:
-        cash = float(initial_cash)
-        shares_held = 0
-        pv_list = [initial_cash]
-        actions_list: list = []
-
-        future_dates = pd.bdate_range(
-            start=hist["Date"].iloc[-1] + pd.Timedelta(days=1),
-            periods=days,
-        )
-        future_df = pd.DataFrame({
-            "Date": future_dates,
-            "Open": path[1:],
-            "High": [p * 1.01 for p in path[1:]],
-            "Low": [p * 0.99 for p in path[1:]],
-            "Close": path[1:],
-            "Volume": [int(hist["Volume"].mean())] * days,
-        })
-
-        combined_df = pd.concat([
-            hist_tail[["Date", "Open", "High", "Low", "Close", "Volume"]],
-            future_df,
-        ], ignore_index=True)
-
-        try:
-            full_df, _ = preprocess_for_rnn(combined_df)
-            n_steps = len(full_df)
-            if n_steps <= SEQ_LEN + 2:
-                raise ValueError("too short after preprocess")
-
-            future_start = max(SEQ_LEN, n_steps - days - 1)
-            prices_a = full_df["Close"].values
-
-            for d in range(days):
-                t = future_start + d
-                if t >= n_steps - 1:
-                    break
-                state = get_state(full_df[FEATURE_COLS], t, cash, shares_held)
-                _, _, action_idx, _pred = forward_policy(state)
-                price_now = float(prices_a[t])
-
-                if action_idx == 1 and cash >= price_now:
-                    sh = min(_pred, int(cash // price_now))
-                    cash -= sh * price_now
-                    shares_held += sh
-                elif action_idx == 2 and shares_held > 0:
-                    sh = min(_pred, shares_held)
-                    cash += sh * price_now
-                    shares_held -= sh
-
-                pv = cash + shares_held * price_now
-                pv_list.append(pv)
-                actions_list.append(["HOLD", "BUY", "SELL"][action_idx])
-
-            while len(pv_list) <= days:
-                pv_list.append(pv_list[-1])
-            while len(actions_list) < days:
-                actions_list.append("HOLD")
-
-        except Exception:
-            pv_list = [initial_cash] * (days + 1)
-            actions_list = ["HOLD"] * days
-
-        all_portfolios.append(pv_list[: days + 1])
-        all_actions.append(actions_list[:days])
-
-    portfolios_arr = np.array(all_portfolios)
-    avg_pv = portfolios_arr.mean(axis=0).tolist()
-    best_pv = portfolios_arr.max(axis=0).tolist()
-    worst_pv = portfolios_arr.min(axis=0).tolist()
-    p25_pv = np.percentile(portfolios_arr, 25, axis=0).tolist()
-    p75_pv = np.percentile(portfolios_arr, 75, axis=0).tolist()
-
-    common_actions = []
-    for d in range(days):
-        day_actions = [all_actions[s][d] for s in range(n_simulations) if d < len(all_actions[s])]
-        common_actions.append(
-            Counter(day_actions).most_common(1)[0][0] if day_actions else "HOLD"
-        )
-
-    paths_arr = np.array(all_paths)
-    avg_price = paths_arr.mean(axis=0).tolist()
-    best_price = paths_arr.max(axis=0).tolist()
-    worst_price = paths_arr.min(axis=0).tolist()
-
-    result_days = []
-    for d in range(days + 1):
-        result_days.append({
-            "day": d,
-            "avg_portfolio": round(avg_pv[d], 2),
-            "best_portfolio": round(best_pv[d], 2),
-            "worst_portfolio": round(worst_pv[d], 2),
-            "p25_portfolio": round(p25_pv[d], 2),
-            "p75_portfolio": round(p75_pv[d], 2),
-            "avg_price": round(avg_price[d], 2),
-            "best_price": round(best_price[d], 2),
-            "worst_price": round(worst_price[d], 2),
-            "action": common_actions[d - 1] if d > 0 else "START",
-        })
-
-    final_avg = avg_pv[-1]
-    return {
-        "ticker": ticker,
-        "initial_cash": initial_cash,
-        "days": days,
-        "simulations": n_simulations,
-        "current_price": last_price,
-        "final_avg_portfolio": round(final_avg, 2),
-        "final_best_portfolio": round(best_pv[-1], 2),
-        "final_worst_portfolio": round(worst_pv[-1], 2),
-        "expected_return": round((final_avg / initial_cash - 1) * 100, 2),
-        "trajectory": result_days,
-    }
+        return _execute_backtest(ticker, initial_cash, test_days)
+    except ValueError as e:
+        msg = str(e)
+        if msg.startswith("No data for"):
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
 
 
 @app.get("/api/portfolio/summary")
-async def get_portfolio_summary():
-    results = {}
+async def get_portfolio_summary(initial_cash: float = 2000, test_days: int = 100):
+    results: dict = {}
     total_dqn = 0.0
     total_bh = 0.0
+    capital_base = float(len(TICKERS) * initial_cash)
 
     for ticker in TICKERS:
         try:
-            hist = yf.Ticker(ticker).history(period="2y")
-            hist.reset_index(inplace=True)
-            if hist.empty:
-                raise ValueError("empty hist")
-            split = int(len(hist) * TRAIN_SIZE)
-            test_raw = hist.iloc[split:].reset_index(drop=True)
-            test_df, _ = preprocess_for_rnn(test_raw)
-            prices = test_df["Close"].values
-
-            _, dqn_final = run_trading_episode(test_df, prices, 2000.0)
-
-            first_price = float(prices[SEQ_LEN])
-            last_price = float(prices[-1])
-            bh_shares = int(2000 // first_price)
-            bh_residual = 2000 - bh_shares * first_price
-            bh_final = bh_shares * last_price + bh_residual
-
+            r = _execute_backtest(ticker, initial_cash, test_days)
             results[ticker] = {
-                "dqn": round(float(dqn_final), 2),
-                "bh": round(float(bh_final), 2),
-                "dqn_ret": round((float(dqn_final) / 2000 - 1) * 100, 2),
-                "bh_ret": round((bh_final / 2000 - 1) * 100, 2),
+                "dqn": r["dqn_final"],
+                "bh": r["bh_final"],
+                "dqn_ret": r["dqn_return"],
+                "bh_ret": r["bh_return"],
             }
-            total_dqn += float(dqn_final)
-            total_bh += bh_final
-
-        except Exception as e:
+            total_dqn += float(r["dqn_final"])
+            total_bh += float(r["bh_final"])
+        except ValueError as e:
             results[ticker] = {
-                "dqn": 2000,
-                "bh": 2000,
-                "dqn_ret": 0,
-                "bh_ret": 0,
+                "dqn": round(initial_cash, 2),
+                "bh": round(initial_cash, 2),
+                "dqn_ret": 0.0,
+                "bh_ret": 0.0,
                 "error": str(e),
             }
 
     return {
         "tickers": results,
+        "initial_cash_per_ticker": initial_cash,
+        "test_days_param": test_days,
         "total_dqn": round(total_dqn, 2),
         "total_bh": round(total_bh, 2),
-        "total_dqn_return": round((total_dqn / 10000 - 1) * 100, 2),
-        "total_bh_return": round((total_bh / 10000 - 1) * 100, 2),
+        "total_dqn_return": round((total_dqn / capital_base - 1) * 100, 2) if capital_base else 0.0,
+        "total_bh_return": round((total_bh / capital_base - 1) * 100, 2) if capital_base else 0.0,
     }
 
 
