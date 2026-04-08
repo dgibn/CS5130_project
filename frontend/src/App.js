@@ -533,9 +533,13 @@ function App() {
                         {prediction.confidence}% confidence
                       </span>
                     </div>
-                    {prediction.predicted_volume != null && (
+                    {Array.isArray(prediction.q_values) && prediction.combined_index != null && (
                       <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 12 }}>
-                        Predicted next trade size: <strong style={{ color: "#e2e8f0" }}>{prediction.predicted_volume}</strong> shares
+                        Predicted next trade size:{" "}
+                        <strong style={{ color: "#e2e8f0" }}>
+                          {prediction.q_values[prediction.combined_index]?.shares ?? 0}
+                        </strong>{" "}
+                        shares
                       </div>
                     )}
                     <div className="q-label">Q-VALUES (from model)</div>
@@ -595,18 +599,7 @@ function App() {
                   <div>
                     <div style={{ fontSize: 18, fontWeight: 700 }}>Backtest: {selectedTicker}</div>
                     <div style={{ fontSize: 13, color: "#64748b" }}>
-                      D3QN vs Buy & Hold — ${backtestData.initial_cash.toLocaleString()} initial
-                      — {backtestData.test_days} simulated trading days
-                      {backtestData.n_data != null && (
-                        <> (test split: {backtestData.n_data} bars after features)</>
-                      )}
-                      {backtestData.period != null && (
-                        <> — data {backtestData.period} hold-out test ({(100 * (1 - (backtestData.train_test_split ?? 0.8))).toFixed(0)}%)</>
-                      )}
-                      {backtestData.simulation_days_requested != null &&
-                        backtestData.simulation_days_requested !== backtestData.test_days && (
-                        <> — up to {backtestData.simulation_days_requested} steps</>
-                      )}
+                      D3QN vs Buy & Hold
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 32 }}>
