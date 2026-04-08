@@ -10,7 +10,7 @@
 # If `conda` is not on PATH, common install locations are tried (miniconda3, anaconda3, miniforge).
 #
 # Other env:
-#   PORT, PYTHON (when USE_CONDA=0), DQN_CHECKPOINT
+#   PORT, PYTHON (when USE_CONDA=0), DQN_CHECKPOINT, DQN_ALLOW_UNINITIALIZED=1 (dev only)
 
 set -euo pipefail
 
@@ -18,6 +18,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${PORT:-8000}"
 PYTHON="${PYTHON:-python}"
 export DQN_CHECKPOINT="${DQN_CHECKPOINT:-}"
+export DQN_ALLOW_UNINITIALIZED="${DQN_ALLOW_UNINITIALIZED:-}"
 USE_CONDA="${USE_CONDA:-1}"
 CONDA_ENV="${CONDA_ENV:-cs5130}"
 

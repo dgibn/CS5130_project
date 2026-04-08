@@ -2,9 +2,9 @@
 FastAPI backend for the Dueling DQN Trading API.
 Loads [src/DQN.py](DQN.py) and serves predictions with action + volume head.
 
-Checkpoint: DQN_CHECKPOINT env, else src/Q_net.pt, else project-root Q_net.pt.
-If you trained with train_volume.py's 5-class volume head, weights must match DQN.py
-(4 classes: 5/10/15/20 shares) or load will fail — retrain or align architectures.
+Checkpoint: DQN_CHECKPOINT env, else src/Q_net_best.pt, else project-root Q_net_best.pt.
+Must match train_volume.train_qNET: 11 combined (action × volume) Q-outputs and the same
+state layout (portfolio volume scaled by /20 like training). Auxiliary volume head: 4 buckets.
 
 Usage:
     pip install fastapi uvicorn
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -26,8 +26,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.preprocessing import StandardScaler
 
-from config import ACTIONS, CASH, INPUT_DIM, SEQ_LEN, TICKERS
-from dataloader import FEATURE_COLS, _add_features
+from config import CASH, EVAL_HISTORY_PERIOD, INPUT_DIM, SEQ_LEN, TICKERS, TRAIN_SIZE
+from dataloader import FEATURE_COLS, _add_features, train_test_split
 from dataloader_rnn import preprocess_for_rnn
 from DQN import DuelingDQN
 
@@ -40,17 +40,17 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_SRC_DIR, ".."))
 
 
 def resolve_checkpoint() -> str:
-    """Prefer DQN_CHECKPOINT; else src/Q_net.pt; else ../Q_net.pt (project root)."""
+    """Prefer DQN_CHECKPOINT; else src/Q_net_best.pt; else ../Q_net_best.pt (project root)."""
     env = os.environ.get("DQN_CHECKPOINT")
     if env and os.path.isfile(env):
         return env
     for path in (
-        os.path.join(_SRC_DIR, "Q_net.pt"),
-        os.path.join(_PROJECT_ROOT, "Q_net.pt"),
+        os.path.join(_SRC_DIR, "Q_net_best.pt"),
+        os.path.join(_PROJECT_ROOT, "Q_net_best.pt"),
     ):
         if os.path.isfile(path):
             return path
-    return os.path.join(_SRC_DIR, "Q_net.pt")
+    return os.path.join(_SRC_DIR, "Q_net_best.pt")
 
 
 CHECKPOINT = resolve_checkpoint()
@@ -58,6 +58,14 @@ CHECKPOINT = resolve_checkpoint()
 STATE_SIZE = SEQ_LEN * len(FEATURE_COLS) + 2
 assert len(FEATURE_COLS) == INPUT_DIM
 assert STATE_SIZE == SEQ_LEN * INPUT_DIM + 2
+
+# Same flattened action × volume space as train_volume.train_qNET (NUM_COMBINED = 11)
+VOL_CLASSES = [1, 5, 10, 15, 20]
+COMBINED_ACTIONS: list[tuple[int, int]] = [(0, 0)]
+for v in VOL_CLASSES:
+    COMBINED_ACTIONS.append((1, v))
+    COMBINED_ACTIONS.append((2, v))
+NUM_COMBINED = len(COMBINED_ACTIONS)
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -80,12 +88,12 @@ model: DuelingDQN | None = None
 
 def load_model() -> None:
     global model
-    model = DuelingDQN(STATE_SIZE, len(ACTIONS)).to(device)
+    model = DuelingDQN(STATE_SIZE, NUM_COMBINED).to(device)
     if not os.path.isfile(CHECKPOINT):
         raise FileNotFoundError(
             f"Checkpoint not found. Tried: DQN_CHECKPOINT, "
-            f"{os.path.join(_SRC_DIR, 'Q_net.pt')}, {os.path.join(_PROJECT_ROOT, 'Q_net.pt')}\n"
-            f"Set DQN_CHECKPOINT=/path/to/model.pt or copy Q_net.pt into src/ or project root.\n"
+            f"{os.path.join(_SRC_DIR, 'Q_net_best.pt')}, {os.path.join(_PROJECT_ROOT, 'Q_net_best.pt')}\n"
+            f"Set DQN_CHECKPOINT=/path/to/model.pt or copy Q_net_best.pt into src/ or project root.\n"
             f"Train with train_volume.py (train_qNET) using DQN.DuelingDQN."
         )
     model.load_state_dict(torch.load(CHECKPOINT, map_location=device))
@@ -102,8 +110,20 @@ async def startup() -> None:
 
 def get_state(df: pd.DataFrame, idx: int, cash: float, volume: int) -> torch.Tensor:
     row = df.iloc[idx - SEQ_LEN + 1 : idx + 1].values.flatten().astype(np.float32)
-    portfolio = np.array([cash / CASH, float(volume) / 10.0], dtype=np.float32)
+    # Match train_volume.get_state (max volume in COMBINED_ACTIONS is 20)
+    portfolio = np.array([cash / CASH, float(volume) / 20.0], dtype=np.float32)
     return torch.tensor(np.concatenate([row, portfolio]), dtype=torch.float32)
+
+
+def get_legal_mask(cash: float, volume: int, price: float) -> torch.Tensor:
+    """Same as train_volume: mask illegal combined actions before argmax."""
+    mask = torch.ones(NUM_COMBINED, dtype=torch.bool)
+    for i, (act, vol) in enumerate(COMBINED_ACTIONS):
+        if act == 1 and cash < price * vol:
+            mask[i] = False
+        elif act == 2 and volume < vol:
+            mask[i] = False
+    return mask
 
 
 # Longer periods are not always more reliable with yfinance; try several until SEQ_LEN rows remain.
@@ -180,23 +200,51 @@ def fetch_inference_df(ticker: str) -> Tuple[pd.DataFrame, np.ndarray]:
 
 
 @torch.no_grad()
-def forward_policy(state_1d: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
+def forward_policy(
+    state_1d: torch.Tensor,
+    cash: float,
+    volume: int,
+    price: float,
+) -> Tuple[torch.Tensor, torch.Tensor, int, int, int]:
+    """
+    Greedy policy: masked argmax on Q-values picks the combined action (hold vs buy/sell slot).
+    Trade size for BUY/SELL comes from the auxiliary volume head (argmax on volume_logits
+    mapped through model.volume_classes); HOLD uses 0 shares.
+    """
     assert model is not None
     model.reset_noise()
     s = state_1d.unsqueeze(0).to(device)
     q_values, volume_logits = model(s)
-    action_idx = int(q_values.argmax(dim=-1).item())
-    vol_idx = int(volume_logits.argmax(dim=-1).item())
-    pred_vol = int(model.volume_classes[vol_idx])
-    return q_values.squeeze(0), volume_logits.squeeze(0), action_idx, pred_vol
+    q_values = q_values.squeeze(0)
+    vol_logits_1d = volume_logits.squeeze(0)
+    mask = get_legal_mask(cash, volume, price).to(device)
+    q_masked = q_values.clone()
+    q_masked[~mask] = float("-inf")
+    combined_idx = int(q_masked.argmax().item())
+    act, _ = COMBINED_ACTIONS[combined_idx]
+    vol_idx = int(vol_logits_1d.argmax().item())
+    pred_shares_aux = int(model.volume_classes[vol_idx])
+    pred_shares = 0 if act == 0 else pred_shares_aux
+    return q_values, vol_logits_1d, combined_idx, act, pred_shares
 
 
 def run_trading_episode(
     test_df: pd.DataFrame,
     prices: np.ndarray,
     initial_cash: float,
-) -> Tuple[list, float]:
-    """Step through test_df from SEQ_LEN; greedy action + volume from model."""
+    days_to_simulate: Optional[int] = None,
+) -> Tuple[list, float, int]:
+    """
+    Step through test_df from SEQ_LEN.
+
+    If days_to_simulate is set, matches test.py test_Qnet_single: iterate up to that
+    many steps with idx = SEQ_LEN + step, break when idx >= T - 1.
+
+    If None, walks all timesteps from SEQ_LEN to T - 2 (legacy).
+
+    Returns (portfolio, final_value, last_t) where last_t is the last bar index used
+    for B&H valuation on the same horizon.
+    """
     cash = float(initial_cash)
     volume = 0
     action_names = ["HOLD", "BUY", "SELL"]
@@ -204,7 +252,7 @@ def run_trading_episode(
 
     T = len(test_df)
     if T <= SEQ_LEN + 1:
-        return portfolio, initial_cash
+        return [], float(initial_cash), SEQ_LEN
 
     portfolio.append({
         "day": 0,
@@ -216,63 +264,85 @@ def run_trading_episode(
         "shares": volume,
     })
 
-    for t in range(SEQ_LEN, T - 1):
-        state = get_state(test_df[FEATURE_COLS], t, cash, volume)
-        _, _, action_idx, pred_shares = forward_policy(state)
-        price_now = float(prices[t])
+    if days_to_simulate is None:
+        t_iter = range(SEQ_LEN, T - 1)
+    else:
+        t_iter = []
+        for step in range(days_to_simulate):
+            tt = SEQ_LEN + step
+            if tt >= T - 1:
+                break
+            t_iter.append(tt)
 
-        if action_idx == 1 and cash >= price_now:
+    last_t = SEQ_LEN
+    for t in t_iter:
+        state = get_state(test_df[FEATURE_COLS], t, cash, volume)
+        price_now = float(prices[t])
+        _, _, _, act, pred_shares = forward_policy(state, cash, volume, price_now)
+
+        if act == 1 and cash >= price_now:
             sh = min(pred_shares, int(cash // price_now))
             cash -= sh * price_now
             volume += sh
-        elif action_idx == 2 and volume > 0:
+        elif act == 2 and volume > 0:
             sh = min(pred_shares, volume)
             cash += sh * price_now
             volume -= sh
 
         pv = cash + volume * price_now
+        last_t = t
         portfolio.append({
             "day": len(portfolio),
             "value": round(pv, 2),
-            "action": action_names[action_idx],
+            "action": action_names[act],
             "predicted_volume": pred_shares,
             "price": round(price_now, 2),
             "cash": round(cash, 2),
             "shares": volume,
         })
 
-    return portfolio, portfolio[-1]["value"]
+    final_val = portfolio[-1]["value"] if len(portfolio) > 1 else float(initial_cash)
+    return portfolio, float(final_val), last_t
 
 
-def _execute_backtest(ticker: str, initial_cash: float, test_days: int) -> dict:
+def _execute_backtest(ticker: str, initial_cash: float) -> dict:
     """
-    Shared pipeline for /api/backtest and /api/portfolio/summary.
-    Raises ValueError on failure (message used for HTTP detail or per-ticker error).
+    Same evaluation window as test.py test_Qnet_single:
+    yfinance period=EVAL_HISTORY_PERIOD, chronological train/test split (TRAIN_SIZE), preprocess
+    test split only, then days_to_simulate = max(240, n_data - 1 - SEQ_LEN) steps.
     """
     t = ticker.upper()
     try:
-        hist = yf.Ticker(t).history(period="5y")
-        hist.reset_index(inplace=True)
+        hist = yf.Ticker(t).history(period=EVAL_HISTORY_PERIOD)
     except Exception as e:
         raise ValueError(f"Failed to fetch {t}: {e}") from e
 
     if hist.empty:
         raise ValueError(f"No data for {t}")
 
-    needed_raw = test_days + SEQ_LEN + 60
-    test_raw = hist.tail(needed_raw).reset_index(drop=True)
+    _, test_raw = train_test_split(hist, TRAIN_SIZE)
     test_df, _ = preprocess_for_rnn(test_raw)
     prices = test_df["Close"].values
+    n_data = len(test_df)
 
-    portfolio, dqn_final = run_trading_episode(test_df, prices, initial_cash)
+    if n_data <= SEQ_LEN + 1:
+        raise ValueError("Insufficient data for backtest after preprocess")
+
+    days_to_simulate = max(240, n_data - 1 - SEQ_LEN)
+
+    portfolio, dqn_final, last_t = run_trading_episode(
+        test_df, prices, initial_cash, days_to_simulate=days_to_simulate
+    )
     if not portfolio:
         raise ValueError("Insufficient data for backtest")
 
     first_price = float(prices[SEQ_LEN])
-    last_price = float(prices[-1])
+    last_price = float(prices[last_t])
     bh_shares = int(initial_cash // first_price)
     bh_residual = initial_cash - bh_shares * first_price
     bh_final = bh_shares * last_price + bh_residual
+
+    trading_days = max(0, len(portfolio) - 1)
 
     return {
         "ticker": t,
@@ -281,7 +351,12 @@ def _execute_backtest(ticker: str, initial_cash: float, test_days: int) -> dict:
         "bh_final": round(float(bh_final), 2),
         "dqn_return": round((float(dqn_final) / initial_cash - 1) * 100, 2),
         "bh_return": round((bh_final / initial_cash - 1) * 100, 2),
-        "test_days": len(portfolio),
+        "test_days": trading_days,
+        "raw_rows": len(hist),
+        "n_data": n_data,
+        "period": EVAL_HISTORY_PERIOD,
+        "train_test_split": TRAIN_SIZE,
+        "simulation_days_requested": days_to_simulate,
         "portfolio": portfolio,
     }
 
@@ -353,28 +428,41 @@ async def get_prediction(
         raise HTTPException(status_code=400, detail=f"Failed to fetch {ticker}: {e}")
 
     idx = len(test_df) - 1
+    price_now = float(prices[idx])
     state = get_state(test_df[FEATURE_COLS], idx, c, vol)
-    q_t, vol_logits_t, action_idx, pred_volume = forward_policy(state)
+    q_t, vol_logits_t, combined_idx, act, pred_volume = forward_policy(
+        state, c, vol, price_now
+    )
 
-    q_np = q_t.cpu().numpy()
-    exp_q = np.exp(q_np - q_np.max())
+    q_np = q_t.cpu().numpy().copy()
+    mask_np = get_legal_mask(c, vol, price_now).numpy()
+    q_adj = q_np.copy()
+    q_adj[~mask_np] = -1e30
+    exp_q = np.exp(q_adj - np.max(q_adj))
     softmax_q = exp_q / exp_q.sum()
-    confidence = float(softmax_q[action_idx] * 100)
+    confidence = float(softmax_q[combined_idx] * 100)
 
     vol_probs = F.softmax(vol_logits_t, dim=-1).cpu().numpy()
     action_names = ["HOLD", "BUY", "SELL"]
 
+    q_breakdown = []
+    for i, (a, sh) in enumerate(COMBINED_ACTIONS):
+        q_breakdown.append({
+            "index": i,
+            "action": action_names[a],
+            "shares": sh,
+            "q": round(float(q_np[i]), 4),
+            "legal": bool(mask_np[i]),
+        })
+
     return {
         "ticker": ticker,
-        "action": action_names[action_idx],
-        "action_index": action_idx,
+        "action": action_names[act],
+        "action_index": act,
+        "combined_index": combined_idx,
         "predicted_volume": pred_volume,
         "confidence": round(confidence, 1),
-        "q_values": {
-            "hold": round(float(q_np[0]), 4),
-            "buy": round(float(q_np[1]), 4),
-            "sell": round(float(q_np[2]), 4),
-        },
+        "q_values": q_breakdown,
         "volume_logits": vol_logits_t.cpu().numpy().tolist(),
         "volume_probs": {str(model.volume_classes[i]): round(float(vol_probs[i]), 4) for i in range(len(model.volume_classes))},
         "price": round(float(prices[idx]), 2),
@@ -384,9 +472,9 @@ async def get_prediction(
 
 
 @app.get("/api/backtest/{ticker}")
-async def get_backtest(ticker: str, initial_cash: float = 10000, test_days: int = 100):
+async def get_backtest(ticker: str, initial_cash: float = 10000):
     try:
-        return _execute_backtest(ticker, initial_cash, test_days)
+        return _execute_backtest(ticker, initial_cash)
     except ValueError as e:
         msg = str(e)
         if msg.startswith("No data for"):
@@ -395,7 +483,7 @@ async def get_backtest(ticker: str, initial_cash: float = 10000, test_days: int 
 
 
 @app.get("/api/portfolio/summary")
-async def get_portfolio_summary(initial_cash: float = 2000, test_days: int = 100):
+async def get_portfolio_summary(initial_cash: float = 10000):
     results: dict = {}
     total_dqn = 0.0
     total_bh = 0.0
@@ -403,7 +491,7 @@ async def get_portfolio_summary(initial_cash: float = 2000, test_days: int = 100
 
     for ticker in TICKERS:
         try:
-            r = _execute_backtest(ticker, initial_cash, test_days)
+            r = _execute_backtest(ticker, initial_cash)
             results[ticker] = {
                 "dqn": r["dqn_final"],
                 "bh": r["bh_final"],
@@ -424,7 +512,9 @@ async def get_portfolio_summary(initial_cash: float = 2000, test_days: int = 100
     return {
         "tickers": results,
         "initial_cash_per_ticker": initial_cash,
-        "test_days_param": test_days,
+        "period": EVAL_HISTORY_PERIOD,
+        "train_test_split": TRAIN_SIZE,
+        "simulation_rule": "max(240, n_test - 1 - SEQ_LEN) steps on held-out test split (same as test.py)",
         "total_dqn": round(total_dqn, 2),
         "total_bh": round(total_bh, 2),
         "total_dqn_return": round((total_dqn / capital_base - 1) * 100, 2) if capital_base else 0.0,

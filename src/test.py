@@ -83,7 +83,7 @@ def test_qlearning(test_df, days_window):
 
 def test_rnn_single(ticker):
     """Evaluate the trained RNN-DQN on one ticker's test set."""
-    hist = yf.Ticker(ticker).history(period=PERIOD)
+    hist = yf.Ticker(ticker).history(period=EVAL_HISTORY_PERIOD)
     _, test_raw = train_test_split(hist, TRAIN_SIZE)
     test_df, _ = preprocess_for_rnn(test_raw)
 
@@ -144,7 +144,7 @@ def test_rnn_single(ticker):
 
 def baseline_buy_and_hold(ticker, cash):
     """Buy & hold: spend $cash on ticker at entry, track daily portfolio value."""
-    hist = yf.Ticker(ticker).history(period=PERIOD)
+    hist = yf.Ticker(ticker).history(period=EVAL_HISTORY_PERIOD)
     _, test_raw = train_test_split(hist, TRAIN_SIZE)
     test_df, _ = preprocess_for_rnn(test_raw)
 
@@ -173,7 +173,7 @@ def baseline_buy_and_hold(ticker, cash):
 def test_Qnet_single(q_net, ticker, cash, volume):
     """Evaluate the trained QNet with flattened action×volume on one ticker."""
 
-    hist = yf.Ticker(ticker).history(period=PERIOD)
+    hist = yf.Ticker(ticker).history(period=EVAL_HISTORY_PERIOD)
     _, test_raw = train_test_split(hist, TRAIN_SIZE)
     test_df, _ = preprocess_for_rnn(test_raw)
 

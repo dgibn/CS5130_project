@@ -34,9 +34,8 @@ function readApiJson(response) {
 /** Must match backend [config.TICKERS](src/config.py) for portfolio keys */
 const TICKERS = ["GOOG", "AAPL", "MSFT", "AMZN", "META"];
 
-/** Same as /api/backtest and /api/portfolio/summary query params */
-const PORTFOLIO_INITIAL_CASH = 2000;
-const PORTFOLIO_TEST_DAYS = 100;
+/** Per-ticker initial cash for /api/backtest and /api/portfolio/summary ($10k each; 5 tickers => $50k total) */
+const PORTFOLIO_INITIAL_CASH = 10000;
 const COLORS = {
   GOOG: "#ea4335",
   GOOGL: "#ea4335",
@@ -76,6 +75,191 @@ function Card({ children, style }) {
   return <div className="card" style={style}>{children}</div>;
 }
 
+function DogSVG() {
+  return (
+    <svg
+      viewBox="0 0 120 70"
+      width="110"
+      height="64"
+      xmlns="http://www.w3.org/2000/svg"
+      style={{ display: "block", overflow: "visible" }}
+    >
+      <defs>
+        {/* Top-to-bottom coat gradient: highlight → mid-tone → shadow */}
+        <linearGradient id="dg-body" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor="#ecc07a" />
+          <stop offset="45%"  stopColor="#d4956a" />
+          <stop offset="100%" stopColor="#9a6030" />
+        </linearGradient>
+        <linearGradient id="dg-head" x1="0" y1="0" x2="0.4" y2="1">
+          <stop offset="0%"   stopColor="#e8b87a" />
+          <stop offset="100%" stopColor="#bf7d40" />
+        </linearGradient>
+        <linearGradient id="dg-leg-far" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor="#b87840" />
+          <stop offset="100%" stopColor="#8a5520" />
+        </linearGradient>
+        <linearGradient id="dg-leg-near" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor="#d49050" />
+          <stop offset="100%" stopColor="#a86030" />
+        </linearGradient>
+      </defs>
+
+      {/* ── TAIL (behind body) ── */}
+      <g className="dog-tail">
+        {/* Outer tail shape — filled silhouette */}
+        <path
+          d="M22 38 C14 32 6 26 8 14 C9 8 14 7 17 11 C19 15 18 22 20 28 C21 31 23 35 22 38Z"
+          fill="#bf7d40"
+        />
+        {/* Inner highlight */}
+        <path
+          d="M20 34 C15 28 10 21 12 13 C13 10 16 10 17 13 C17 18 18 24 20 30Z"
+          fill="#d49050"
+        />
+      </g>
+
+      {/* ── REAR LEGS (far side — darker, behind body) ── */}
+      {/* Rear-left (far) */}
+      <g className="dog-leg dog-leg-rl">
+        <path
+          d="M28 43 C27 50 25 55 24 61 C23 65 27 67 31 66 C34 65 33 62 32 59 C31 55 31 50 32 43Z"
+          fill="url(#dg-leg-far)"
+        />
+        {/* knee dimple */}
+        <ellipse cx="29" cy="54" rx="2" ry="1.5" fill="#9a6030" opacity="0.5" />
+      </g>
+      {/* Rear-right (far) */}
+      <g className="dog-leg dog-leg-rr">
+        <path
+          d="M35 43 C34 50 32 55 31 61 C30 65 34 67 38 66 C41 65 40 62 39 59 C38 55 38 50 39 43Z"
+          fill="url(#dg-leg-far)"
+        />
+        <ellipse cx="36" cy="54" rx="2" ry="1.5" fill="#9a6030" opacity="0.5" />
+      </g>
+
+      {/* ── BODY (organic bezier silhouette) ── */}
+      {/* Underbelly fill first (shadow) */}
+      <path
+        className="dog-body"
+        d="
+          M 24 22
+          C 28 14, 42 12, 60 15
+          C 72 17, 80 20, 83 27
+          C 86 31, 81 38, 73 41
+          C 63 44, 47 44, 35 41
+          C 25 40, 19 36, 18 30
+          C 18 27, 21 24, 24 22 Z
+        "
+        fill="url(#dg-body)"
+      />
+      {/* Back-line highlight stroke for the arch */}
+      <path
+        d="M 26 20 C 38 13, 55 13, 68 17 C 74 19, 80 22, 82 27"
+        fill="none"
+        stroke="#ecc07a"
+        strokeWidth="2"
+        strokeLinecap="round"
+        opacity="0.55"
+      />
+
+      {/* ── FRONT LEGS (near side — lighter, in front of body) ── */}
+      {/* Front-left (far) */}
+      <g className="dog-leg dog-leg-fl">
+        <path
+          d="M58 45 C57 52 55 57 54 63 C53 67 57 68 61 67 C64 66 63 63 62 60 C61 56 61 51 62 45Z"
+          fill="url(#dg-leg-far)"
+        />
+        <ellipse cx="59" cy="56" rx="2" ry="1.5" fill="#9a6030" opacity="0.5" />
+      </g>
+      {/* Front-right (near) */}
+      <g className="dog-leg dog-leg-fr">
+        <path
+          d="M66 45 C65 52 63 57 62 63 C61 67 65 68 69 67 C72 66 71 63 70 60 C69 56 69 51 70 45Z"
+          fill="url(#dg-leg-near)"
+        />
+        <ellipse cx="67" cy="56" rx="2" ry="1.5" fill="#9a6030" opacity="0.4" />
+      </g>
+
+      {/* ── COLLAR (app accent color) ── */}
+      <rect x="72" y="34" width="16" height="5" rx="2.5" fill="#c3f73a" />
+      {/* Tag */}
+      <circle cx="80" cy="41" r="3" fill="#ffd700" />
+      <circle cx="80" cy="41" r="1.5" fill="#e6a800" />
+
+      {/* ── NECK ── */}
+      <path
+        d="M 74 22 C 78 18, 86 20, 88 26 C 90 32, 86 40, 80 42 C 76 43, 72 41, 72 38 C 72 32, 72 26, 74 22 Z"
+        fill="url(#dg-body)"
+      />
+
+      {/* ── HEAD GROUP ── */}
+      {/* Floppy ear (hangs behind skull, drawn first) */}
+      <path
+        d="M 84 12 C 78 10, 74 14, 75 22 C 76 28, 80 31, 85 30 C 88 29, 89 25, 87 19 C 86 15, 85 12, 84 12 Z"
+        fill="#b06a30"
+      />
+      {/* Ear inner sheen */}
+      <path
+        d="M 84 15 C 80 14, 78 18, 79 24 C 80 28, 83 29, 85 27 C 87 25, 86 20, 85 16 Z"
+        fill="#c88040"
+        opacity="0.6"
+      />
+
+      {/* Skull */}
+      <path
+        d="M 88 12 C 94 8, 104 10, 106 18 C 108 24, 104 30, 98 32 C 93 33, 88 30, 87 24 C 86 18, 87 14, 88 12 Z"
+        fill="url(#dg-head)"
+      />
+
+      {/* Muzzle / snout — wedge shape */}
+      <path
+        d="M 96 26 C 100 24, 108 25, 112 28 C 115 31, 113 36, 108 37 C 102 38, 96 36, 95 32 C 94 29, 95 27, 96 26 Z"
+        fill="#c88040"
+      />
+      {/* Muzzle top highlight */}
+      <path
+        d="M 98 26 C 103 24, 108 25, 111 28"
+        fill="none"
+        stroke="#e0a860"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        opacity="0.7"
+      />
+
+      {/* Nose — dark with subtle ridge */}
+      <ellipse cx="112" cy="27" rx="4" ry="3" fill="#1a0802" />
+      <ellipse cx="112" cy="25.5" rx="3" ry="1" fill="#2e1408" />
+      {/* Nostril shine */}
+      <circle cx="110.5" cy="26" r="1" fill="#3a1a08" />
+
+      {/* Eye — dark iris with white highlight */}
+      <circle cx="96" cy="18" r="3.5" fill="#1a0802" />
+      <circle cx="96" cy="18" r="2"   fill="#2e1a08" />
+      {/* Catch-light */}
+      <circle cx="97.2" cy="16.8" r="1.1" fill="#ffffff" />
+
+      {/* Brow ridge */}
+      <path
+        d="M 92 14 C 95 12, 100 13, 102 16"
+        fill="none"
+        stroke="#a06030"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+
+      {/* Smile / mouth */}
+      <path
+        d="M 104 34 Q 108 38 112 34"
+        fill="none"
+        stroke="#7a4820"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function App() {
   const [selectedTicker, setSelectedTicker] = useState("AAPL");
   const [tab, setTab] = useState("chart");
@@ -86,6 +270,9 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [apiOnline, setApiOnline] = useState(null);
+  const [userCash, setUserCash] = useState(10000);
+  const [userShares, setUserShares] = useState(0);
+  const [predLoading, setPredLoading] = useState(false);
 
   // Check API on mount
   useEffect(() => {
@@ -95,35 +282,45 @@ function App() {
       .catch(() => setApiOnline(false));
   }, []);
 
-  // Chart tab only: avoids running /predict while on other tabs (shared error + loading fights portfolio/backtest).
-  // allSettled: price chart still loads if predict fails.
+  // Fetch price data for the chart tab.
   useEffect(() => {
     if (!apiOnline || tab !== "chart") return;
     let cancelled = false;
     setLoading(true);
     setError(null);
     setPriceData(null);
+    apiFetch(`${API}/api/price/${selectedTicker}?period=6mo`)
+      .then(readApiJson)
+      .then((data) => {
+        if (cancelled) return;
+        setPriceData(data);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e.message || "Failed to load price data");
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedTicker, apiOnline, tab]);
+
+  // Fetch prediction — called manually via button or automatically on ticker/tab change.
+  function fetchPrediction() {
+    setPredLoading(true);
     setPrediction(null);
-    Promise.allSettled([
-      apiFetch(`${API}/api/price/${selectedTicker}?period=6mo`).then(readApiJson),
-      apiFetch(`${API}/api/predict/${selectedTicker}`).then(readApiJson),
-    ]).then(([priceResult, predResult]) => {
-      if (cancelled) return;
-      if (priceResult.status === "fulfilled") {
-        setPriceData(priceResult.value);
-      } else {
-        setError(priceResult.reason?.message || "Failed to load price data");
-      }
-      if (predResult.status === "fulfilled") {
-        setPrediction(predResult.value);
-      } else {
-        setPrediction(null);
-      }
-      setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
+    apiFetch(
+      `${API}/api/predict/${selectedTicker}?cash=${userCash}&shares=${userShares}`
+    )
+      .then(readApiJson)
+      .then((d) => { setPrediction(d); setPredLoading(false); })
+      .catch(() => { setPrediction(null); setPredLoading(false); });
+  }
+
+  // Auto-predict when ticker or tab changes.
+  useEffect(() => {
+    if (!apiOnline || tab !== "chart") return;
+    fetchPrediction();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTicker, apiOnline, tab]);
 
   // Fetch backtest when tab = backtest
@@ -134,7 +331,7 @@ function App() {
     setLoading(true);
     setBacktestData(null);
     apiFetch(
-      `${API}/api/backtest/${selectedTicker}?initial_cash=${PORTFOLIO_INITIAL_CASH}&test_days=${PORTFOLIO_TEST_DAYS}`,
+      `${API}/api/backtest/${selectedTicker}?initial_cash=${PORTFOLIO_INITIAL_CASH}`,
     )
       .then(readApiJson)
       .then((data) => {
@@ -160,7 +357,7 @@ function App() {
     setLoading(true);
     setPortfolioSummary(null);
     apiFetch(
-      `${API}/api/portfolio/summary?initial_cash=${PORTFOLIO_INITIAL_CASH}&test_days=${PORTFOLIO_TEST_DAYS}`,
+      `${API}/api/portfolio/summary?initial_cash=${PORTFOLIO_INITIAL_CASH}`,
     )
       .then(readApiJson)
       .then((data) => {
@@ -288,8 +485,39 @@ function App() {
             {/* Signal panel */}
                 <div className="signal-col">
               <Card>
+                <div className="section-label">Portfolio State</div>
+                <div className="pred-inputs">
+                  <label>
+                    Cash ($)
+                    <input
+                      type="number"
+                      min="0"
+                      value={userCash}
+                      onChange={(e) => setUserCash(Number(e.target.value))}
+                    />
+                  </label>
+                  <label>
+                    Shares held
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={userShares}
+                      onChange={(e) => setUserShares(Math.max(0, parseInt(e.target.value) || 0))}
+                    />
+                  </label>
+                  <button
+                    className="pred-btn"
+                    onClick={fetchPrediction}
+                    disabled={predLoading}
+                  >
+                    {predLoading ? "Loading..." : "Predict"}
+                  </button>
+                </div>
+              </Card>
+              <Card>
                 <div className="section-label">D3QN LIVE SIGNAL</div>
-                {loading ? (
+                {predLoading ? (
                   <Spinner />
                 ) : !prediction && priceData ? (
                   <p style={{ color: "#94a3b8", fontSize: 14 }}>
@@ -311,14 +539,41 @@ function App() {
                       </div>
                     )}
                     <div className="q-label">Q-VALUES (from model)</div>
-                    {Object.entries(prediction.q_values ?? {}).map(([k, v]) => (
-                      <div key={k} className="q-row">
-                        <span className="q-name">{k}</span>
-                        <span className={`q-val ${v > 0 ? "pos" : v < 0 ? "neg" : ""}`}>
-                          {typeof v === "number" ? `${v > 0 ? "+" : ""}${v.toFixed(4)}` : String(v)}
-                        </span>
-                      </div>
-                    ))}
+                    {Array.isArray(prediction.q_values)
+                      ? prediction.q_values.map((item) => {
+                          const q = Number(item.q);
+                          const label =
+                            item.shares > 0
+                              ? `${item.index} ${item.action} ${item.shares}`
+                              : `${item.index} ${item.action}`;
+                          return (
+                            <div
+                              key={`${item.index}-${item.action}-${item.shares}`}
+                              className="q-row"
+                              style={{ opacity: item.legal === false ? 0.45 : 1 }}
+                            >
+                              <span className="q-name">
+                                {label}
+                                {item.legal === false ? (
+                                  <span style={{ color: "#64748b", fontSize: 11 }}> (illegal)</span>
+                                ) : null}
+                              </span>
+                              <span className={`q-val ${q > 0 ? "pos" : q < 0 ? "neg" : ""}`}>
+                                {`${q > 0 ? "+" : ""}${q.toFixed(4)}`}
+                              </span>
+                            </div>
+                          );
+                        })
+                      : Object.entries(prediction.q_values ?? {}).map(([k, v]) => (
+                          <div key={k} className="q-row">
+                            <span className="q-name">{k}</span>
+                            <span className={`q-val ${v > 0 ? "pos" : v < 0 ? "neg" : ""}`}>
+                              {typeof v === "number"
+                                ? `${v > 0 ? "+" : ""}${v.toFixed(4)}`
+                                : String(v)}
+                            </span>
+                          </div>
+                        ))}
                     <div className="model-info">
                       Price: ${prediction.price ?? "—"} | Dueling DQN + volume head
                     </div>
@@ -341,7 +596,17 @@ function App() {
                     <div style={{ fontSize: 18, fontWeight: 700 }}>Backtest: {selectedTicker}</div>
                     <div style={{ fontSize: 13, color: "#64748b" }}>
                       D3QN vs Buy & Hold — ${backtestData.initial_cash.toLocaleString()} initial
-                      — {backtestData.test_days} trading days
+                      — {backtestData.test_days} simulated trading days
+                      {backtestData.n_data != null && (
+                        <> (test split: {backtestData.n_data} bars after features)</>
+                      )}
+                      {backtestData.period != null && (
+                        <> — data {backtestData.period} hold-out test ({(100 * (1 - (backtestData.train_test_split ?? 0.8))).toFixed(0)}%)</>
+                      )}
+                      {backtestData.simulation_days_requested != null &&
+                        backtestData.simulation_days_requested !== backtestData.test_days && (
+                        <> — up to {backtestData.simulation_days_requested} steps</>
+                      )}
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 32 }}>
@@ -397,8 +662,14 @@ function App() {
                 {/* Summary */}
                 <Card>
                   <div className="section-label">
-                    TOTAL PORTFOLIO ({TICKERS.length} × ${PORTFOLIO_INITIAL_CASH.toLocaleString()} — {PORTFOLIO_TEST_DAYS}d backtest each)
+                    TOTAL PORTFOLIO ({TICKERS.length} × ${PORTFOLIO_INITIAL_CASH.toLocaleString()} per ticker)
                   </div>
+                  {portfolioSummary.period != null && (
+                    <div style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>
+                      Same window as test.py: yfinance period {portfolioSummary.period}, train/test {((portfolioSummary.train_test_split ?? 0.8) * 100).toFixed(0)}/
+                      {((1 - (portfolioSummary.train_test_split ?? 0.8)) * 100).toFixed(0)} split; {portfolioSummary.simulation_rule ?? "max(240, n_test − 1 − SEQ_LEN) steps on test split"}.
+                    </div>
+                  )}
                   <div className="summary-row">
                     <div>
                       <div className="stat-label">D3QN</div>
@@ -506,6 +777,15 @@ function App() {
           </>
         )}
       </main>
+
+      <footer className="dog-track" aria-hidden="true">
+        <div className="dog-scene">
+          <div className="dog-sprite">
+            <div className="dog-welcome">Welcome to the CS5130 project</div>
+            <DogSVG />
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
