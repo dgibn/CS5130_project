@@ -11,7 +11,7 @@ from RNN import RNNQNetwork
 from DQN import DuelingDQN
 import yfinance as yf
 
-yf.set_tz_cache_location("/tmp") 
+yf.set_tz_cache_location("/tmp")
 
 device = torch.device(
     "cuda" if torch.cuda.is_available()
@@ -19,6 +19,17 @@ device = torch.device(
     else "cpu"
 )
 
+# ── Must match train.py ─────────────────────────────────────────────────────
+VOL_CLASSES = [1, 5, 10, 15, 20]
+
+COMBINED_ACTIONS = [(0, 0)]
+for v in VOL_CLASSES:
+    COMBINED_ACTIONS.append((1, v))
+    COMBINED_ACTIONS.append((2, v))
+NUM_COMBINED = len(COMBINED_ACTIONS)
+
+
+# ── Q-Learning test ──────────────────────────────────────────────────────────
 
 def test_qlearning(test_df, days_window):
     with open("Q_table.pickle", "rb") as f:
@@ -64,9 +75,11 @@ def test_qlearning(test_df, days_window):
     print(f"\nFinal portfolio value:    {final_value:.2f}")
     print(f"Baseline (buy & hold):   {baseline_value:.2f}")
     print(f"Profit over baseline:    {final_value - baseline_value:.2f}")
-    
+
     return baseline_value, final_value, cash_history
 
+
+# ── RNN-DQN test ─────────────────────────────────────────────────────────────
 
 def test_rnn_single(ticker):
     """Evaluate the trained RNN-DQN on one ticker's test set."""
@@ -84,7 +97,7 @@ def test_rnn_single(ticker):
     start_idx        = SEQ_LEN
     days_to_simulate = max(240, n_data - 1 - SEQ_LEN)
     cash, volume = float(CASH), 0
-    
+
     bh_shares = int(cash // prices[start_idx])
     bh_leftover = cash - bh_shares * prices[start_idx]
     baseline_value = bh_leftover + bh_shares * prices[start_idx + days_to_simulate - 1]
@@ -123,8 +136,11 @@ def test_rnn_single(ticker):
     print(f"\nFinal portfolio value:    {final_value:.2f}")
     print(f"Baseline (buy & hold):   {baseline_value:.2f}")
     print(f"Profit over baseline:    {final_value - baseline_value:.2f}")
-    
+
     return baseline_value, final_value, cash_history
+
+
+# ── Baseline buy & hold ──────────────────────────────────────────────────────
 
 def baseline_buy_and_hold(ticker, cash):
     """Buy & hold: spend $cash on ticker at entry, track daily portfolio value."""
@@ -152,10 +168,11 @@ def baseline_buy_and_hold(ticker, cash):
     return cash_history
 
 
-def test_Qnet_single(q_net,ticker,cash,volume):
-    """Evaluate the trained QNet on one ticker's test set."""
+# ── Dueling DQN test (flattened action × volume) ────────────────────────────
 
-    # ── Load & preprocess ────────────────────────────────────────────────
+def test_Qnet_single(q_net, ticker, cash, volume):
+    """Evaluate the trained QNet with flattened action×volume on one ticker."""
+
     hist = yf.Ticker(ticker).history(period=PERIOD)
     _, test_raw = train_test_split(hist, TRAIN_SIZE)
     test_df, _ = preprocess_for_rnn(test_raw)
@@ -163,94 +180,102 @@ def test_Qnet_single(q_net,ticker,cash,volume):
     prices = test_df["Close"].values
     n_data = len(test_df)
 
-    # ── Simulation setup ─────────────────────────────────────────────────
     start_idx        = SEQ_LEN
     days_to_simulate = max(240, n_data - 1 - SEQ_LEN)
 
-
-    # ── Baseline (buy & hold) ───────────────────────────────────────────
+    # Baseline (buy & hold)
     entry_price    = prices[start_idx]
     shares_bh      = int(cash // entry_price)
-    baseline_value = (
-        cash // prices[start_idx]
-        * prices[start_idx + days_to_simulate - 1]
-    )
     bh_leftover    = cash - shares_bh * entry_price
     baseline_value = bh_leftover + shares_bh * prices[start_idx + days_to_simulate - 1]
-    
+
     cash_history = []
 
     def get_state(df, idx: int, cash: float, volume: int) -> torch.Tensor:
         row = df.iloc[idx - SEQ_LEN + 1 : idx + 1].values.flatten().astype(np.float32)
         portfolio = np.array([
-            cash / CASH,           # normalised cash
-            float(volume) / 10.0,  # normalised volume
+            cash / CASH,
+            float(volume) / 20.0,
         ], dtype=np.float32)
         return torch.tensor(np.concatenate([row, portfolio]), dtype=torch.float32)
 
+    def get_legal_mask(cash, volume, price):
+        mask = torch.ones(NUM_COMBINED, dtype=torch.bool)
+        for i, (act, vol) in enumerate(COMBINED_ACTIONS):
+            if act == 1 and cash < price * vol:
+                mask[i] = False
+            elif act == 2 and volume < vol:
+                mask[i] = False
+        return mask
+
     q_net.eval()
 
-    # ── Simulation loop ───────────────────────────────────────────────────
     for t in range(days_to_simulate):
         idx = start_idx + t
         if idx >= n_data - 1:
             break
 
-        state = get_state(test_df[FEATURE_COLS], idx, cash, volume).to(device)
+        state     = get_state(test_df[FEATURE_COLS], idx, cash, volume).to(device)
+        price_now = prices[idx]
+        mask      = get_legal_mask(cash, volume, price_now)
 
         with torch.no_grad():
-            # BUG 3 FIX: reset noise before every inference forward pass
             q_net.reset_noise()
-            action, vol = q_net(state.unsqueeze(0))
-            action = action.argmax().item()
-            vol= vol.argmax().item()
-            
-            VOL_CLASSES     = [1, 5, 10, 15, 20] 
-            vol = VOL_CLASSES[vol]
-        
-        price_now = prices[idx]
-        print(f"Day {t+1}: TESTING Action: {action}, Volume: {vol}, Cash: {cash:>10.2f}, TotalVolume: {volume:>4}, Price: {price_now:>8.2f}")
-            
+            out    = q_net(state.unsqueeze(0))
+            q_vals = out[0] if isinstance(out, tuple) else out        # [1, 11]
+            q_vals[0, ~mask.to(device)] = float("-inf")
+            action_idx = q_vals.argmax(dim=1).item()
 
-        if action == 1 and cash >= price_now:    # buy
-            shares   = min(int(cash // price_now), vol)
-            cash    -= shares * price_now
-            volume  += shares
-            position = 1
-        elif action == 2 and volume > 0:         # sell
-            shares   = min(volume, vol)
-            cash    += shares * price_now
-            volume  -= shares
-            position = 0 if volume == 0 else position
+        action, pred_shares = COMBINED_ACTIONS[action_idx]
+
+        action_name = {0: "HOLD", 1: "BUY", 2: "SELL"}[action]
+        print(
+            f"Day {t+1}: {action_name:>4} x{pred_shares:<2} | "
+            f"Cash: {cash:>10.2f} | Volume: {volume:>4} | "
+            f"Price: {price_now:>8.2f}"
+        )
+
+        if action == 1 and cash >= price_now:
+            shares  = min(pred_shares, int(cash // price_now))
+            cash   -= shares * price_now
+            volume += shares
+        elif action == 2 and volume > 0:
+            shares  = min(pred_shares, volume)
+            cash   += shares * price_now
+            volume -= shares
 
         cash_history.append(cash + volume * price_now)
-    # ── Final report ──────────────────────────────────────────────────────
+
     final_price = prices[min(start_idx + days_to_simulate - 1, n_data - 1)]
     final_value = cash + volume * final_price
 
-    # print(f"\n{'─'*40}")
-    # print(f"Final portfolio value  : {final_value:>10.2f}")
-    # print(f"Baseline (buy & hold)  : {baseline_value:>10.2f}")
-    # print(f"Profit over baseline   : {final_value - baseline_value:>10.2f}")
+    return final_value, baseline_value, cash_history
 
-    return final_value,baseline_value, cash_history
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
 
     print(f"Using device: {device}")
-    model = DuelingDQN(162, len(ACTIONS)).to(device)
-    model.load_state_dict(torch.load("Q_net.pt", map_location=device))
+
+    # Load with flattened action space (11 outputs)
+    model = DuelingDQN(162, NUM_COMBINED).to(device)
+    model.load_state_dict(torch.load("Q_net_best.pt", map_location=device))
     model.eval()
-    total_val = 0.0 
+
+    total_val    = 0.0
     Baseline_val = 0.0
     all_histories = []
+
     for ticker in TICKERS:
         val1, val2, cash_history = test_Qnet_single(model, ticker, float(CASH), 0)
         print(val1, val2)
-        total_val += val1
+        total_val    += val1
         Baseline_val += val2
         all_histories.append(cash_history)
+
     total_cash_history = np.sum(all_histories, axis=0)
+
     csv_path = 'cash_history.csv'
     file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
     with open(csv_path, 'a', newline='') as f:
@@ -259,86 +284,8 @@ if __name__ == "__main__":
             header = ["Method"] + [f"Day{i+1}" for i in range(len(total_cash_history))]
             writer.writerow(header)
         writer.writerow(["duelingDQN"] + list(total_cash_history))
+
     print(f"\n{'─'*40}")
     print(f"Final portfolio value  : {total_val:>10.2f}")
     print(f"Baseline (buy & hold)  : {Baseline_val:>10.2f}")
-    print(f"Profit over baseline   : {(total_val-Baseline_val):>10.2f}")
-    '''
-   csv_path = 'cash_history.csv'
-    all_baseline_histories = []
-    for ticker in TICKERS:
-        bh = baseline_buy_and_hold(ticker, float(CASH))
-        all_baseline_histories.append(bh)
-    total_baseline_history = np.sum(all_baseline_histories, axis=0)
-
-    with open(csv_path, 'a', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["baseline"] + list(total_baseline_history))'''
-
-
-
-    
-    exit()
-    if MODE == "qlearning":
-        total_baseline = 0
-        total_final = 0
-
-        csv_path = 'results.csv'
-        file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
-
-        all_histories = []
-        for ticker in TICKERS:
-            _, test_df, _, _ = load_data(ticker, TRAIN_SIZE, PERIOD)
-            baseline, final, cash_history = test_qlearning(test_df, DAYS_WINDOW)
-            total_baseline += baseline
-            total_final += final
-            all_histories.append(cash_history)
-
-        total_cash_history = np.sum(all_histories, axis=0)
-
-        with open(csv_path, 'a', newline='') as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                header = ["Method"] + [f"Day{i+1}" for i in range(len(total_cash_history))]
-                writer.writerow(header)
-            writer.writerow([MODE] + list(total_cash_history))
-
-        print(f"\nFinal portfolio value:    {total_final:.2f}")
-        print(f"Baseline (buy & hold):   {total_baseline:.2f}")
-        print(f"Profit over baseline:    {total_final - total_baseline:.2f}")
-
-    elif MODE == "rnn":
-        print(f"Using device: {device}")
-        model = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM, NUM_LAYERS).to(device)
-        model.load_state_dict(torch.load("rnn_q_network.pt", map_location=device))
-        model.eval()
-
-        total_baseline = 0
-        total_final = 0
-
-        all_histories = []
-        for ticker in TICKERS:
-            print(f"\n{'='*20} {ticker} {'='*20}")
-            baseline, final, cash_history = test_rnn_single(ticker)
-            total_baseline += baseline
-            total_final += final
-            all_histories.append(cash_history)
-
-        total_cash_history = np.sum(all_histories, axis=0)
-
-        csv_path = 'cash_history.csv'
-        file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
-
-        with open(csv_path, 'a', newline='') as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                header = ["Method"] + [f"Day{i+1}" for i in range(len(total_cash_history))]
-                writer.writerow(header)
-            writer.writerow([MODE] + list(total_cash_history))
-
-        print(f"\nFinal portfolio value:    {total_final:.2f}")
-        print(f"Baseline (buy & hold):   {total_baseline:.2f}")
-        print(f"Profit over baseline:    {total_final - total_baseline:.2f}")
-    
-    # else:
-    #     raise ValueError(f"Unknown MODE: {MODE}")
+    print(f"Profit over baseline   : {(total_val - Baseline_val):>10.2f}")
