@@ -5,7 +5,7 @@ import {
 } from "recharts";
 import "./App.css";
 
-const API = "https://dooly-melanoid-gerald.ngrok-free.dev";
+const API = "https://eustatic-crowdedly-veola.ngrok-free.dev";
 
 /** ngrok free tier: avoid HTML interstitial blocking fetch() */
 const API_HEADERS = { "ngrok-skip-browser-warning": "true" };

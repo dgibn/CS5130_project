@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the Trading API (src/api.py) and ngrok in one terminal.
+# Start the Trading API (backend/api.py) and ngrok in one terminal.
 # From the project root:
 #   ./scripts/start-api-and-ngrok.sh
 #
@@ -47,7 +47,7 @@ _load_conda_sh() {
 }
 
 _run_api() {
-  cd "$ROOT/src"
+  cd "$ROOT/backend"
   if [[ "$USE_CONDA" == "1" ]]; then
     if ! command -v conda &>/dev/null; then
       echo "conda not found on PATH. Tried sourcing conda.sh from common install dirs." >&2
@@ -82,9 +82,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "$USE_CONDA" == "1" ]]; then
-  echo "Starting API: conda run -n ${CONDA_ENV} python api.py (port $PORT)"
+  echo "Starting API: conda run -n ${CONDA_ENV} python api.py from backend/ (port $PORT)"
 else
-  echo "Starting API: $PYTHON api.py (port $PORT)"
+  echo "Starting API: $PYTHON api.py from backend/ (port $PORT)"
 fi
 (
   _run_api
@@ -95,7 +95,7 @@ echo "Waiting for http://127.0.0.1:${PORT}/api/tickers ..."
 ready=0
 for _ in $(seq 1 90); do
   if ! kill -0 "$API_PID" 2>/dev/null; then
-    echo "API process exited before becoming ready. Check errors above or run: cd src && python api.py"
+    echo "API process exited before becoming ready. Check errors above or run: cd backend && python api.py"
     exit 1
   fi
   if curl -sf "http://127.0.0.1:${PORT}/api/tickers" >/dev/null 2>&1; then
