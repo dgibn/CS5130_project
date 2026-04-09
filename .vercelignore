@@ -1,0 +1,6 @@
+src/
+DQN_Trading/
+Procfile
+requirements.txt
+*.pt
+*.csv
