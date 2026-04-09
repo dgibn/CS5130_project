@@ -409,8 +409,8 @@ async def get_price(ticker: str, period: str = "6mo"):
 @app.get("/api/predict/{ticker}")
 async def get_prediction(
     ticker: str,
-    cash: float | None = None,
-    shares: int | None = None,
+    cash: Optional[float],
+    shares: Optional[int],
 ):
     """
     Next-step signal: HOLD/BUY/SELL and predicted trade volume (share bucket).
