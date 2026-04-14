@@ -105,7 +105,7 @@ After changing training settings, re-run the matching training script, then test
 
 ---
 
-## 4. Viewing results on the frontend
+## 4. Website
 
 The hosted dashboard is:
 
