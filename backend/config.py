@@ -12,7 +12,7 @@ PERIOD = "10y"
 # yfinance window for API backtest, test.py, and offline eval — matches /api/backtest (training may still use PERIOD).
 EVAL_HISTORY_PERIOD = "10y"
 DAYS_WINDOW = 5
-CASH = 10000
+CASH = 2000
 VOLUME = 0
 PRICE = None
 TIME = None

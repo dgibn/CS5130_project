@@ -1,2 +1,8 @@
 frontend/node_modules/
 Q_table.pickle
+Q_net4.pt
+Q_net_best.pt
+rnn_q_network.pt
+output_test.log
+output_test1.log
+cash_history.csv

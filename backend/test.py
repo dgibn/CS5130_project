@@ -417,7 +417,7 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown MODE: {MODE}")
 
-    print(f"\n{'─'*40}")
+    print(f"{'-'*40}")
     print(f"Final portfolio value  : {total_val:>10.2f}")
     print(f"Baseline (buy & hold)  : {Baseline_val:>10.2f}")
     print(f"Profit over baseline   : {(total_val - Baseline_val):>10.2f}")
