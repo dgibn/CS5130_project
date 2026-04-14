@@ -5,16 +5,10 @@ import {
 } from "recharts";
 import "./App.css";
 
-const API = "https://eustatic-crowdedly-veola.ngrok-free.dev";
-
-/** ngrok free tier: avoid HTML interstitial blocking fetch() */
-const API_HEADERS = { "ngrok-skip-browser-warning": "true" };
+const API = "https://my-api-575590178782.us-central1.run.app";
 
 function apiFetch(url, options = {}) {
-  return fetch(url, {
-    ...options,
-    headers: { ...API_HEADERS, ...(options.headers || {}) },
-  });
+  return fetch(url, options);
 }
 
 /** Parse JSON and throw if status is not OK (FastAPI returns { detail: ... }). */
@@ -381,7 +375,7 @@ function App() {
       <div className="offline-screen">
         <div style={{ fontSize: 48 }}>⚡</div>
         <h2>API Offline</h2>
-        <p>Start the backend and ngrok tunnel, or check the API URL in App.js.</p>
+        <p>Ensure the deployed API is reachable, or check the API URL in App.js.</p>
         <code>cd src && python api.py</code>
         <p style={{ marginTop: 12, fontSize: 13, color: "#64748b" }}>
           Then refresh this page.
