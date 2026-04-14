@@ -8,7 +8,8 @@ from config import *
 from dataloader import load_data, train_test_split, FEATURE_COLS
 from dataloader_rnn import preprocess_for_rnn
 from RNN import RNNQNetwork
-from DQN import DuelingDQN
+from DQN import DuelingDQN as DuelingDQNVolume
+from Q_network import DuelingDQN as DuelingDQN3
 import yfinance as yf
 
 yf.set_tz_cache_location("/tmp")
@@ -27,6 +28,33 @@ for v in VOL_CLASSES:
     COMBINED_ACTIONS.append((1, v))
     COMBINED_ACTIONS.append((2, v))
 NUM_COMBINED = len(COMBINED_ACTIONS)
+
+# Checkpoints (defaults match train.py / train_volume.py; override via env)
+QNET_CHECKPOINT = os.environ.get("QNET_CHECKPOINT", "Q_net4.pt")
+DQN_VOL_CHECKPOINT = os.environ.get("DQN_CHECKPOINT", "Q_net_best.pt")
+RNN_CHECKPOINT = os.environ.get("RNN_CHECKPOINT", "rnn_q_network.pt")
+
+
+def _fit_rnn_scaler_from_train():
+    """Match train_rnn: fit scaler on first ticker, transform rest on train splits."""
+    scaler = None
+    for t in TICKERS:
+        hist = yf.Ticker(t).history(period=PERIOD)
+        train_raw, _ = train_test_split(hist, TRAIN_SIZE)
+        _, scaler = preprocess_for_rnn(train_raw, scaler=scaler)
+    return scaler
+
+
+def append_cash_history_csv(method, total_cash_history):
+    total_cash_history = np.asarray(total_cash_history)
+    csv_path = "cash_history.csv"
+    file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            header = ["Method"] + [f"Day{i+1}" for i in range(len(total_cash_history))]
+            writer.writerow(header)
+        writer.writerow([method] + list(total_cash_history))
 
 
 # ── Q-Learning test ──────────────────────────────────────────────────────────
@@ -81,11 +109,11 @@ def test_qlearning(test_df, days_window):
 
 # ── RNN-DQN test ─────────────────────────────────────────────────────────────
 
-def test_rnn_single(ticker):
-    """Evaluate the trained RNN-DQN on one ticker's test set."""
-    hist = yf.Ticker(ticker).history(period=EVAL_HISTORY_PERIOD)
+def test_rnn_single(ticker, model, scaler):
+    """Evaluate the trained RNN-DQN on one ticker's test set (scaler from train_rnn)."""
+    hist = yf.Ticker(ticker).history(period=PERIOD)
     _, test_raw = train_test_split(hist, TRAIN_SIZE)
-    test_df, _ = preprocess_for_rnn(test_raw)
+    test_df, _ = preprocess_for_rnn(test_raw, scaler=scaler)
 
     cash_history = []
     features = torch.tensor(
@@ -102,6 +130,7 @@ def test_rnn_single(ticker):
     bh_leftover = cash - bh_shares * prices[start_idx]
     baseline_value = bh_leftover + bh_shares * prices[start_idx + days_to_simulate - 1]
 
+    model.eval()
     for t in range(days_to_simulate):
         idx = start_idx + t
         if idx >= n_data - 1:
@@ -109,7 +138,7 @@ def test_rnn_single(ticker):
 
         state_seq = features[idx - SEQ_LEN + 1 : idx + 1]
         with torch.no_grad():
-            q = model(state_seq.unsqueeze(0))
+            q = model(state_seq.unsqueeze(0).to(device))
             action = q[0, -1, :].argmax().item()
 
         price_now = prices[idx]
@@ -138,6 +167,78 @@ def test_rnn_single(ticker):
     print(f"Profit over baseline:    {final_value - baseline_value:.2f}")
 
     return baseline_value, final_value, cash_history
+
+
+# ── 3-action Dueling DQN (train.py train_qNET) ─────────────────────────────
+
+def test_qnet_three_action(q_net, ticker, cash, volume):
+    """Evaluate Q_network.DuelingDQN (3 actions, max 10 shares) on one ticker."""
+    hist = yf.Ticker(ticker).history(period=EVAL_HISTORY_PERIOD)
+    _, test_raw = train_test_split(hist, TRAIN_SIZE)
+    test_df, _ = preprocess_for_rnn(test_raw)
+
+    prices = test_df["Close"].values
+    n_data = len(test_df)
+
+    start_idx        = SEQ_LEN
+    days_to_simulate = max(240, n_data - 1 - SEQ_LEN)
+
+    entry_price    = prices[start_idx]
+    shares_bh      = int(cash // entry_price)
+    bh_leftover    = cash - shares_bh * entry_price
+    baseline_value = bh_leftover + shares_bh * prices[start_idx + days_to_simulate - 1]
+
+    cash_history = []
+
+    def get_state(df, idx: int, cash: float, volume: int) -> torch.Tensor:
+        row = df.iloc[idx - SEQ_LEN + 1 : idx + 1].values.flatten().astype(np.float32)
+        portfolio = np.array([
+            cash / CASH,
+            float(volume) / 10.0,
+        ], dtype=np.float32)
+        return torch.tensor(np.concatenate([row, portfolio]), dtype=torch.float32)
+
+    q_net.eval()
+    for t in range(days_to_simulate):
+        idx = start_idx + t
+        if idx >= n_data - 1:
+            break
+
+        state     = get_state(test_df[FEATURE_COLS], idx, cash, volume).to(device)
+        price_now = prices[idx]
+
+        with torch.no_grad():
+            q_net.reset_noise()
+            out = q_net(state.unsqueeze(0))
+            q_vals = out if not isinstance(out, tuple) else out[0]
+            action = q_vals.argmax(dim=1).item()
+
+        action_name = {0: "HOLD", 1: "BUY", 2: "SELL"}[action]
+        print(
+            f"Day {t+1}: {action_name:>4} | "
+            f"Cash: {cash:>10.2f} | Volume: {volume:>4} | "
+            f"Price: {price_now:>8.2f}"
+        )
+
+        if action == 1 and cash >= price_now:
+            shares = min(int(cash // price_now), 10)
+            cash -= shares * price_now
+            volume += shares
+        elif action == 2 and volume > 0:
+            shares = min(volume, 10)
+            cash += shares * price_now
+            volume -= shares
+
+        cash_history.append(cash + volume * price_now)
+
+    final_price = prices[min(start_idx + days_to_simulate - 1, n_data - 1)]
+    final_value = cash + volume * final_price
+
+    print(f"\nFinal portfolio value:    {final_value:.2f}")
+    print(f"Baseline (buy & hold):   {baseline_value:.2f}")
+    print(f"Profit over baseline:    {final_value - baseline_value:.2f}")
+
+    return final_value, baseline_value, cash_history
 
 
 # ── Baseline buy & hold ──────────────────────────────────────────────────────
@@ -258,32 +359,63 @@ if __name__ == "__main__":
 
     print(f"Using device: {device}")
 
-    # Load with flattened action space (11 outputs)
-    model = DuelingDQN(162, NUM_COMBINED).to(device)
-    model.load_state_dict(torch.load("Q_net_best.pt", map_location=device))
-    model.eval()
-
-    total_val    = 0.0
+    total_val = 0.0
     Baseline_val = 0.0
     all_histories = []
 
-    for ticker in TICKERS:
-        val1, val2, cash_history = test_Qnet_single(model, ticker, float(CASH), 0)
-        print(val1, val2)
-        total_val    += val1
-        Baseline_val += val2
-        all_histories.append(cash_history)
+    if MODE == "qlearning":
+        # Uses config PERIOD; train.py train_qlearning shadows PERIOD with "5y" — set config if needed.
+        _, test_df, _, _ = load_data(TICKERS[0], TRAIN_SIZE, PERIOD)
+        baseline_val, final_val, cash_history = test_qlearning(test_df, DAYS_WINDOW)
+        Baseline_val = baseline_val
+        total_val = final_val
+        append_cash_history_csv(MODE, cash_history)
 
-    total_cash_history = np.sum(all_histories, axis=0)
+    elif MODE == "rnn":
+        rnn_model = RNNQNetwork(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM, NUM_LAYERS).to(device)
+        rnn_model.load_state_dict(torch.load(RNN_CHECKPOINT, map_location=device))
+        rnn_model.eval()
+        rnn_scaler = _fit_rnn_scaler_from_train()
+        for ticker in TICKERS:
+            b, f, h = test_rnn_single(ticker, rnn_model, rnn_scaler)
+            total_val += f
+            Baseline_val += b
+            all_histories.append(h)
+        total_cash_history = np.sum(all_histories, axis=0)
+        append_cash_history_csv(MODE, total_cash_history)
 
-    csv_path = 'cash_history.csv'
-    file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
-    with open(csv_path, 'a', newline='') as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            header = ["Method"] + [f"Day{i+1}" for i in range(len(total_cash_history))]
-            writer.writerow(header)
-        writer.writerow(["duelingDQN"] + list(total_cash_history))
+    elif MODE == "qnet":
+        qnet = DuelingDQN3(162, len(ACTIONS)).to(device)
+        qnet.load_state_dict(torch.load(QNET_CHECKPOINT, map_location=device))
+        qnet.eval()
+        for ticker in TICKERS:
+            val1, val2, cash_history = test_qnet_three_action(
+                qnet, ticker, float(CASH), 0
+            )
+            print(val1, val2)
+            total_val += val1
+            Baseline_val += val2
+            all_histories.append(cash_history)
+        total_cash_history = np.sum(all_histories, axis=0)
+        append_cash_history_csv(MODE, total_cash_history)
+
+    elif MODE == "qnet_volume":
+        vol_model = DuelingDQNVolume(162, NUM_COMBINED).to(device)
+        vol_model.load_state_dict(torch.load(DQN_VOL_CHECKPOINT, map_location=device))
+        vol_model.eval()
+        for ticker in TICKERS:
+            val1, val2, cash_history = test_Qnet_single(
+                vol_model, ticker, float(CASH), 0
+            )
+            print(val1, val2)
+            total_val += val1
+            Baseline_val += val2
+            all_histories.append(cash_history)
+        total_cash_history = np.sum(all_histories, axis=0)
+        append_cash_history_csv(MODE, total_cash_history)
+
+    else:
+        raise ValueError(f"Unknown MODE: {MODE}")
 
     print(f"\n{'─'*40}")
     print(f"Final portfolio value  : {total_val:>10.2f}")

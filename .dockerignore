@@ -1,0 +1,13 @@
+.git
+.github
+.vscode
+frontend/node_modules
+**/__pycache__
+**/*.pyc
+**/*.pyo
+*.ipynb
+.env
+.env.*
+DQN_Trading
+agent-transcripts
+mcps

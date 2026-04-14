@@ -387,13 +387,12 @@ def train_qNET():
 
 
 if __name__ == "__main__":
-    train_qNET()
-    # if MODE == "qlearning":
-    #     train_qlearning()
-    # elif MODE == "rnn":
-    #     train_rnn()
+    if MODE == "qlearning":
+        train_qlearning()
+    elif MODE == "rnn":
+        train_rnn()
     
-    # # elif MODE == "qnet":
-        
-    # else:
-    #     raise ValueError(f"Unknown MODE: {MODE}")
+    elif MODE == "qnet":
+        train_qNET()
+    else:
+       raise ValueError(f"Unknown MODE: {MODE}")

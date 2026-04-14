@@ -1,5 +1,10 @@
-# ── mode ──────────────────────────────────────────────────────────────
-MODE = "qlearning"                  # "qlearning" or "rnn"
+# ── mode (train.py: qlearning | rnn | qnet) ───────────────────────────
+# test.py also accepts qnet_volume (11-action DQN from train_volume.py).
+#   qlearning    — tabular Q; needs Q_table.pickle
+#   rnn          — RNNQNetwork; needs rnn_q_network.pt
+#   qnet         — 3-action Q_network.DuelingDQN; e.g. Q_net4.pt from train_qNET
+#   qnet_volume  — 11-action DQN.DuelingDQN; e.g. Q_net_best.pt from train_volume.py
+MODE = "qnet_volume"
 
 # ── shared ────────────────────────────────────────────────────────────
 TICKERS = ["GOOG","AAPL","MSFT", "AMZN", "META"]
